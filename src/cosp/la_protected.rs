@@ -5,9 +5,9 @@
 
 use super::{
     la_adapter::{
-        sign_source_observation, state_custody, worker_rpc_router, AdmissionLease, ChannelBinding,
-        ChannelKeys, CustodyLedger, CustodyLink, InventoryContext, SignedCheckpoint, SourceAck,
-        TransportJournal, WorkerAdmission, WorkerClient, WorkerRpc,
+        cleanup, sign_source_observation, state_custody, worker_rpc_router, AdmissionLease,
+        ChannelBinding, ChannelKeys, CustodyLedger, CustodyLink, InventoryContext,
+        SignedCheckpoint, SourceAck, TransportJournal, WorkerAdmission, WorkerClient, WorkerRpc,
     },
     la_artifacts, la_auth,
     la_backend::{
@@ -17,8 +17,14 @@ use super::{
     },
     la_contract, la_store, la_worker, lane_assignment, Spine,
 };
-use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Json, Router};
-use serde::Deserialize;
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -111,6 +117,27 @@ pub(super) struct ProtectedWorkerConfig {
     pub(super) lease_ms: u64,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct CleanupEvidence {
+    worker_root: (u64, u64),
+    worker_state_digest: String,
+    occupancy_digest: String,
+    mac_hex: String,
+}
+
+struct WitnessCtx {
+    http: reqwest::blocking::Client,
+    worker_addr: SocketAddr,
+    binding: ChannelBinding,
+    keys: ChannelKeys,
+    c_root: File,
+    ledger: Arc<Mutex<state_custody::Ledger>>,
+    authority: lane_assignment::SharedAuthority,
+    claims: Arc<Mutex<la_store::ClaimStore>>,
+    service_worker: Arc<Mutex<lane_assignment::ServiceWorker>>,
+    custody: Arc<state_custody::Session>,
+}
+
 fn default_one() -> u64 {
     1
 }
@@ -190,6 +217,23 @@ fn build_binding(cfg: &BindingConfig) -> Result<ChannelBinding, String> {
         source_digest: cfg.source_digest.clone(),
         executable_digest,
     })
+}
+
+fn sign_cleanup_evidence(
+    key: &[u8; 32],
+    worker_root: (u64, u64),
+    worker_state_digest: &str,
+    occupancy_digest: &str,
+) -> String {
+    let mut h = Sha256::new();
+    h.update(key);
+    h.update(b"\0diffuser-protected-cleanup-evidence/v1\0");
+    h.update(worker_root.0.to_le_bytes());
+    h.update(worker_root.1.to_le_bytes());
+    h.update(worker_state_digest.as_bytes());
+    h.update(b"\0");
+    h.update(occupancy_digest.as_bytes());
+    hex::encode(h.finalize())
 }
 
 fn attach_local_transport_witness(
@@ -297,62 +341,123 @@ fn capability_from_config(cfg: &BackendConfig) -> Result<Capability, String> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_witnessed_observation(
-    http: &reqwest::blocking::Client,
-    worker_addr: SocketAddr,
-    sequence: u64,
-    binding: &ChannelBinding,
-    keys: &ChannelKeys,
-    ledger: &Arc<Mutex<state_custody::Ledger>>,
-    authority: &lane_assignment::SharedAuthority,
-    claims: &Arc<Mutex<la_store::ClaimStore>>,
-    service_worker: &Arc<Mutex<lane_assignment::ServiceWorker>>,
-    custody: &Arc<state_custody::Session>,
-) -> Result<(), String> {
-    let now = wall_now_ms()?;
-    let bytes = serde_json::to_vec(&json!({
-        "schema_version": "diffuser-authority-observation/v1",
-        "sequence": sequence,
-        "observed_at": now,
-        "revoked": []
-    }))
-    .map_err(|e| format!("obs_json:{e}"))?;
-    let frame = sign_source_observation(&keys.authority, binding, &bytes)
-        .map_err(|e| format!("sign_obs:{e}"))?;
-    ledger
-        .lock()
-        .map_err(|_| "ledger_lock".to_string())?
-        .record_authority(&frame)
-        .map_err(|e| format!("record_authority:{e}"))?;
+impl WitnessCtx {
+    fn push_observation(&self, sequence: u64) -> Result<(), String> {
+        let now = wall_now_ms()?;
+        let bytes = serde_json::to_vec(&json!({
+            "schema_version": "diffuser-authority-observation/v1",
+            "sequence": sequence,
+            "observed_at": now,
+            "revoked": []
+        }))
+        .map_err(|e| format!("obs_json:{e}"))?;
+        let frame = sign_source_observation(&self.keys.authority, &self.binding, &bytes)
+            .map_err(|e| format!("sign_obs:{e}"))?;
+        self.ledger
+            .lock()
+            .map_err(|_| "ledger_lock".to_string())?
+            .record_authority(&frame)
+            .map_err(|e| format!("record_authority:{e}"))?;
 
-    let resp = http
-        .post(format!("http://{worker_addr}/protected/source-observation"))
-        .body(frame.clone())
-        .send()
-        .map_err(|e| format!("worker_obs_post:{e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("worker_obs_status:{}", resp.status().as_u16()));
+        let resp = self
+            .http
+            .post(format!(
+                "http://{}/protected/source-observation",
+                self.worker_addr
+            ))
+            .body(frame.clone())
+            .send()
+            .map_err(|e| format!("worker_obs_post:{e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("worker_obs_status:{}", resp.status().as_u16()));
+        }
+        let worker_ack: SourceAck = resp.json().map_err(|e| format!("worker_obs_json:{e}"))?;
+
+        let controller_ack = lane_assignment::apply_witnessed_protected_source_observation(
+            &self.authority,
+            &self.claims,
+            &self.binding,
+            &self.keys,
+            &frame,
+            Some(&self.service_worker),
+            &self.custody,
+        )
+        .map_err(|e| format!("apply_obs:{e}"))?;
+
+        self.ledger
+            .lock()
+            .map_err(|_| "ledger_lock".to_string())?
+            .observe_authority(&frame, &controller_ack, &worker_ack)
+            .map_err(|e| format!("observe_authority:{e}"))?;
+        Ok(())
     }
-    let worker_ack: SourceAck = resp.json().map_err(|e| format!("worker_obs_json:{e}"))?;
 
-    let controller_ack = lane_assignment::apply_witnessed_protected_source_observation(
-        authority,
-        claims,
-        binding,
-        keys,
-        &frame,
-        Some(service_worker),
-        custody,
-    )
-    .map_err(|e| format!("apply_obs:{e}"))?;
-
-    ledger
-        .lock()
-        .map_err(|_| "ledger_lock".to_string())?
-        .observe_authority(&frame, &controller_ack, &worker_ack)
-        .map_err(|e| format!("observe_authority:{e}"))?;
-    Ok(())
+    fn reconcile_cleanups(&self) {
+        let pending = match self.claims.lock() {
+            Ok(guard) => guard
+                .ready_for_cleanup_assignments(&self.binding.worker)
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let resp = match self
+            .http
+            .get(format!(
+                "http://{}/protected/cleanup-evidence",
+                self.worker_addr
+            ))
+            .send()
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+        let ev: CleanupEvidence = match resp.json() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let expected_mac = sign_cleanup_evidence(
+            &self.keys.reply,
+            ev.worker_root,
+            &ev.worker_state_digest,
+            &ev.occupancy_digest,
+        );
+        if ev.mac_hex != expected_mac {
+            return;
+        }
+        for assignment in pending {
+            let claim = match self.claims.lock() {
+                Ok(guard) => match guard.snapshot_for_cleanup(&assignment) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            let Ok(now) = wall_now_ms() else { continue };
+            let Ok(cert) = cleanup::Certificate::issue_protected(
+                &self.binding,
+                &self.keys,
+                &self.c_root,
+                ev.worker_root,
+                ev.worker_state_digest.clone(),
+                ev.occupancy_digest.clone(),
+                claim,
+                now,
+            ) else {
+                continue;
+            };
+            if let Ok(frame) = serde_json::to_vec(&cert) {
+                let _ = lane_assignment::apply_witnessed_cleanup(
+                    &self.claims,
+                    &self.binding,
+                    &self.keys,
+                    &frame,
+                    &self.custody,
+                );
+            }
+        }
+    }
 }
 
 /// Boot the protected `/v1/diffuser` namespace for `uai-diffuser --protected-config <path>`.
@@ -479,33 +584,29 @@ pub(super) fn bootstrap_controller(
         .build()
         .map_err(|e| format!("http_client:{e}"))?;
 
-    // Perform initial witnessed authority observation across both controller & worker.
-    push_witnessed_observation(
-        &http,
+    let ctx = WitnessCtx {
+        http,
         worker_addr,
-        1,
-        &binding,
-        &keys,
-        &ledger,
-        &authority,
-        &claims,
-        &service_worker,
-        &custody,
-    )?;
+        binding,
+        keys,
+        c_root: c_root
+            .try_clone()
+            .map_err(|_| "c_root_clone_failed".to_string())?,
+        ledger,
+        authority,
+        claims,
+        service_worker,
+        custody: custody.clone(),
+    };
+    ctx.push_observation(1)?;
 
-    // Keep witnessed authority observations and worker admission lease fresh.
-    let refresh_auth = authority.clone();
-    let refresh_claims = claims;
-    let refresh_worker = service_worker;
-    let refresh_custody = custody.clone();
-    let refresh_lease = lease_holder;
     let interval_ms = (cfg.freshness_ms.clamp(500, 6_000) / 3).clamp(300, 1_500);
     std::thread::spawn(move || {
         let mut seq = 1u64;
         loop {
             std::thread::sleep(Duration::from_millis(interval_ms));
             if let Ok(ts) = wall_now_ms() {
-                if let Ok(mut lguard) = refresh_lease.lock() {
+                if let Ok(mut lguard) = lease_holder.lock() {
                     if let Some(lease) = lguard.as_mut() {
                         lease.issued_at = ts;
                         lease.expires_at = ts.saturating_add(300_000);
@@ -513,18 +614,8 @@ pub(super) fn bootstrap_controller(
                 }
             }
             seq = seq.saturating_add(1);
-            let _ = push_witnessed_observation(
-                &http,
-                worker_addr,
-                seq,
-                &binding,
-                &keys,
-                &ledger,
-                &refresh_auth,
-                &refresh_claims,
-                &refresh_worker,
-                &refresh_custody,
-            );
+            let _ = ctx.push_observation(seq);
+            ctx.reconcile_cleanups();
         }
     });
 
@@ -541,6 +632,51 @@ async fn handle_worker_source_observation(
         .observe(&body)
         .map_err(|_| StatusCode::PRECONDITION_FAILED)?;
     Ok(Json(ack))
+}
+
+struct WorkerEvidenceState {
+    w_state: Arc<Mutex<WorkerRpc>>,
+    w_root: File,
+    reply_key: [u8; 32],
+}
+
+async fn handle_worker_cleanup_evidence(
+    State(ev_state): State<Arc<WorkerEvidenceState>>,
+) -> Result<Json<CleanupEvidence>, StatusCode> {
+    use std::os::unix::fs::MetadataExt;
+    let guard = ev_state
+        .w_state
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if guard.journal.running_command().is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+    let meta = ev_state
+        .w_root
+        .metadata()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let worker_root = (meta.dev(), meta.ino());
+    let worker_state_digest = state_custody::state_digest(&ev_state.w_root)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let occupancy_digest = hex::encode(Sha256::digest(
+        format!(
+            "quiescent:{}:{}:{}",
+            worker_root.0, worker_root.1, worker_state_digest
+        )
+        .as_bytes(),
+    ));
+    let mac_hex = sign_cleanup_evidence(
+        &ev_state.reply_key,
+        worker_root,
+        &worker_state_digest,
+        &occupancy_digest,
+    );
+    Ok(Json(CleanupEvidence {
+        worker_root,
+        worker_state_digest,
+        occupancy_digest,
+        mac_hex,
+    }))
 }
 
 /// Run a standalone protected CPU or CUDA worker (`uai-diffuser --worker-config <path> --bind <ip:port> --state-dir <dir>`).
@@ -659,6 +795,7 @@ fn run_worker_inner(config_path: &Path, bind: &str, state_dir: &Path) -> Result<
         }
     });
 
+    let reply_key = keys.reply;
     let session = la_worker::ReservationSession {
         worker: binding.worker.clone(),
         boot: binding.worker_boot.clone(),
@@ -678,12 +815,27 @@ fn run_worker_inner(config_path: &Path, bind: &str, state_dir: &Path) -> Result<
         w.channel.set_owned_state(digest);
     }
 
+    let ev_state = Arc::new(WorkerEvidenceState {
+        w_state: w_state.clone(),
+        w_root: w_root
+            .try_clone()
+            .map_err(|_| "w_root_clone_failed".to_string())?,
+        reply_key,
+    });
     let obs_route = Router::new()
         .route(
             "/protected/source-observation",
             post(handle_worker_source_observation),
         )
-        .with_state(w_state.clone());
+        .with_state(w_state.clone())
+        .merge(
+            Router::new()
+                .route(
+                    "/protected/cleanup-evidence",
+                    get(handle_worker_cleanup_evidence),
+                )
+                .with_state(ev_state),
+        );
 
     let router = worker_rpc_router(
         InventoryContext {

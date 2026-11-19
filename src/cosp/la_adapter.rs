@@ -14060,6 +14060,42 @@ pub(super) mod cleanup {
             certificate.verify(binding, keys, controller_root, now)?;
             Ok(certificate)
         }
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "Protected cleanup certificate binds channel, keys, controller/worker roots, digests, claim, and clock."
+        )]
+        pub(in crate::cosp) fn issue_protected(
+            binding: &ChannelBinding,
+            keys: &ChannelKeys,
+            controller_root: &File,
+            worker_root: (u64, u64),
+            worker_state_digest: String,
+            occupancy_digest: String,
+            claim: Claim,
+            now: u64,
+        ) -> Result<Self, &'static str> {
+            use std::os::unix::fs::MetadataExt;
+            binding.validate()?;
+            let cm = controller_root.metadata().map_err(|_| "evidence_invalid")?;
+            let expires_at = claim.certificate_expiry(binding, now)?;
+            let body = Body {
+                version: 1,
+                binding: binding.clone(),
+                claim,
+                controller_root: (cm.dev(), cm.ino()),
+                worker_root,
+                worker_state_digest,
+                occupancy_digest,
+                observed_at: now,
+                expires_at,
+            };
+            let mac = typed_mac(&keys.custody, b"diffuser-cleanup-occupancy/v1\0", &body)?;
+            Ok(Self {
+                body,
+                mac,
+                loss: None,
+            })
+        }
         pub(in crate::cosp) fn verify(
             &self,
             binding: &ChannelBinding,

@@ -3044,6 +3044,31 @@ impl ClaimStore {
 }
 
 impl ClaimStore {
+    pub(super) fn ready_for_cleanup_assignments(
+        &self,
+        worker: &str,
+    ) -> Result<Vec<String>, &'static str> {
+        let _guard = self.guard()?;
+        let mut s = self
+            .db
+            .prepare(
+                "SELECT a.id FROM la_assignments a                  WHERE a.worker=?1 AND a.state='draining'                  AND EXISTS(SELECT 1 FROM la_assignment_stop_receipts r WHERE r.assignment_id=a.id)                  AND NOT EXISTS(SELECT 1 FROM la_assignment_cleanup_receipts c WHERE c.assignment_id=a.id)                  ORDER BY a.id",
+            )
+            .map_err(|_| "storage_unavailable")?;
+        let rows = s
+            .query_map([worker], |r| r.get(0))
+            .map_err(|_| "storage_unavailable")?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "storage_unavailable")?;
+        Ok(rows)
+    }
+    pub(super) fn snapshot_for_cleanup(
+        &self,
+        assignment: &str,
+    ) -> Result<super::la_adapter::cleanup::Claim, &'static str> {
+        let _guard = self.guard()?;
+        super::la_adapter::cleanup::claim_snapshot(&self.db, assignment)
+    }
     pub(super) fn draining_assignment_owners(
         &self,
         worker: &str,
