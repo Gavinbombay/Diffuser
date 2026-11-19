@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:207-218","kinds/S03-REF.md:46-49"],"expect":{"refuse":{"code":"no-worker","detail_has":["kind 'gpu-farm'","has no dispatch path from this host yet"],"retryable":true}},"id":"dsp-kind-unknown","input":{"kind":"gpu-farm"},"note":"an unknown kind keeps the S01 refusal verbatim","op":"kind_for","source":"kinds/s03/dispatch.py:214"}

@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:455-498","kinds/S03-REF.md:120-139"],"expect":{"rc":124,"reason":null,"state":"timed_out"},"id":"dsp-map-rc124","input":{"observed":{"device_record":null,"dispatched":true,"envelope_code":null,"rc":124,"result_doc":null}},"note":"rc 124 is the timeout convention","op":"map_attempt","source":"kinds/s03/dispatch.py:455"}

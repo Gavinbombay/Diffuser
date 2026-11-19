@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:703-711","kinds/S03-REF.md:66-69"],"expect":{"name":"warp-2070-1-6"},"id":"dsp-part-range","input":{"job":{"frames":"1-6"},"worker_id":"warp-2070"},"note":"a frame range names the part <worker>-<a>-<b>","op":"part_name","source":"kinds/s03/dispatch.py:703"}

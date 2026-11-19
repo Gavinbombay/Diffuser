@@ -1,0 +1,1 @@
+{"area":"admission","cites":["kinds/s03/dispatch.py:280-308"],"expect":{"code":"bad-json","outcome":"refuse","rc":2,"retryable":false},"id":"adm-dupkey-nested","input":{"raw":"{\"api\":\"service-lane/v1\",\"lane\":\"stt\",\"size\":{\"width\":4,\"width\":5}}"},"note":"a duplicate key one nesting level down","op":"load_job","source":"kinds/s03/dispatch.py:256"}

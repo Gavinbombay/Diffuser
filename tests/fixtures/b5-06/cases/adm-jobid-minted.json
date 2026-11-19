@@ -1,0 +1,1 @@
+{"area":"admission","cites":["kinds/s03/dispatch.py:311-316"],"expect":{"job_id_re":"stt-[0-9a-f]{32}"},"id":"adm-jobid-minted","input":{"job":{"lane":"stt"}},"note":"no job_id: one is minted as <lane>-<32 hex> from 128 random bits","op":"job_id_of","source":"kinds/s03/dispatch.py:316"}

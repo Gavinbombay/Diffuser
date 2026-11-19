@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lanes-router/specs/c4-jobspec.schema.json",
+  "title": "job-spec/v1, one job format for every card and lane",
+  "type": "object",
+  "required": [
+    "spec",
+    "job_id",
+    "lane",
+    "cartridge",
+    "card_pref",
+    "items",
+    "seg_min",
+    "deadline_min",
+    "max_segs",
+    "outputs"
+  ],
+  "properties": {
+    "spec": {
+      "const": "job-spec/v1"
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,95}$"
+    },
+    "lane": {
+      "enum": [
+        "render-blender",
+        "diffusion-video",
+        "diffusion-image",
+        "tts",
+        "stt",
+        "music-sfx"
+      ]
+    },
+    "cartridge": {
+      "type": "string",
+      "minLength": 1
+    },
+    "use": {
+      "enum": ["public", "internal"]
+    },
+    "card_pref": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "colab-l4",
+          "echo-3060",
+          "warp-2070"
+        ]
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "args"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,64}$"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "entry": {
+      "type": "string",
+      "minLength": 1
+    },
+    "blend": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seg_min": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "deadline_min": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "max_segs": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "budget_cu": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "cap_cu": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "outputs": {
+      "type": "string",
+      "pattern": "^warp:/mnt/sn850x/lanes/jobs/[a-z0-9][a-z0-9._-]{2,95}/out$"
+    },
+    "gpu_class": {
+      "enum": [
+        "any",
+        "l4",
+        "a100",
+        "h100",
+        "g4"
+      ]
+    },
+    "gpu_min_vram_gb": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "licence_commercial": {
+      "type": "boolean"
+    },
+    "licence_id": {
+      "type": "string"
+    },
+    "licence_checked_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "entry"
+      ]
+    },
+    {
+      "required": [
+        "blend"
+      ]
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "card_pref": {
+            "contains": {
+              "const": "colab-l4"
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "budget_cu"
+        ]
+      }
+    }
+  ],
+  "examples": [
+  {
+    "spec": "job-spec/v1",
+    "job_id": "wire-render-blender",
+    "lane": "render-blender",
+    "cartridge": "fixture",
+    "card_pref": [
+      "warp-2070"
+    ],
+    "items": [
+      {
+        "id": "one",
+        "args": [
+          "[R]"
+        ]
+      },
+      {
+        "id": "two",
+        "args": []
+      }
+    ],
+    "seg_min": 1.5,
+    "deadline_min": 10,
+    "max_segs": 2,
+    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-render-blender/out",
+    "blend": "fixture.blend"
+  },
+  {
+    "spec": "job-spec/v1",
+    "job_id": "wire-diffusion-video",
+    "lane": "diffusion-video",
+    "cartridge": "fixture",
+    "card_pref": [
+      "warp-2070"
+    ],
+    "items": [
+      {
+        "id": "one",
+        "args": [
+          "[R]"
+        ]
+      },
+      {
+        "id": "two",
+        "args": []
+      }
+    ],
+    "seg_min": 1.5,
+    "deadline_min": 10,
+    "max_segs": 2,
+    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-diffusion-video/out",
+    "entry": "run"
+  },
+  {
+    "spec": "job-spec/v1",
+    "job_id": "wire-diffusion-image",
+    "lane": "diffusion-image",
+    "cartridge": "fixture",
+    "card_pref": [
+      "warp-2070"
+    ],
+    "items": [
+      {
+        "id": "one",
+        "args": [
+          "[R]"
+        ]
+      },
+      {
+        "id": "two",
+        "args": []
+      }
+    ],
+    "seg_min": 1.5,
+    "deadline_min": 10,
+    "max_segs": 2,
+    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-diffusion-image/out",
+    "entry": "run"
+  },
+  {
+    "spec": "job-spec/v1",
+    "job_id": "wire-tts",
+    "lane": "tts",
+    "cartridge": "fixture",
+    "card_pref": [
+      "warp-2070"
+    ],
+    "items": [
+      {
+        "id": "one",
+        "args": [
+          "[R]"
+        ]
+      },
+      {
+        "id": "two",
+        "args": []
+      }
+    ],
+    "seg_min": 1.5,
+    "deadline_min": 10,
+    "max_segs": 2,
+    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-tts/out",
+    "entry": "run",
+    "budget_cu": 2,
+    "cap_cu": 3,
+    "gpu_class": "any",
+    "gpu_min_vram_gb": 1,
+    "licence_commercial": true,
+    "licence_id": "fixture",
+    "licence_checked_at": "2026-11-01T00:00:00Z",
+    "use": "internal"
+  },
+  {
+    "spec": "job-spec/v1",
+    "job_id": "wire-stt",
+    "lane": "stt",
+    "cartridge": "fixture",
+    "card_pref": [
+      "warp-2070"
+    ],
+    "items": [
+      {
+        "id": "one",
+        "args": [
+          "[R]"
+        ]
+      },
+      {
+        "id": "two",
+        "args": []
+      }
+    ],
+    "seg_min": 1.5,
+    "deadline_min": 10,
+    "max_segs": 2,
+    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-stt/out",
+    "entry": "run"
+  },
+  {
+    "spec": "job-spec/v1",
+    "job_id": "wire-music-sfx",
+    "lane": "music-sfx",
+    "cartridge": "fixture",
+    "card_pref": [
+      "warp-2070"
+    ],
+    "items": [
+      {
+        "id": "one",
+        "args": [
+          "[R]"
+        ]
+      },
+      {
+        "id": "two",
+        "args": []
+      }
+    ],
+    "seg_min": 1.5,
+    "deadline_min": 10,
+    "max_segs": 2,
+    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-music-sfx/out",
+    "entry": "run"
+  }
+]
+}

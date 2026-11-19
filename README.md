@@ -1,0 +1,112 @@
+<p align="center">
+  <img src="assets/diffuser-logo.png" alt="Diffuser logo: three colored routes branching from a central hub" width="200">
+</p>
+
+# Diffuser
+
+### One request. The right worker.
+
+[![License: Apache License 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange.svg)](Cargo.toml)
+[![Protocol](https://img.shields.io/badge/Protocol-service--lane%2Fv1_%7C_diffuser--lane%2Fv1-teal.svg)](#architecture)
+
+**Diffuser is a Rust resource router, typed SDK, and operator CLI for tools, agents, and services.** It discovers compatible CPU and CUDA workers, reserves exact capacity under a lease, executes idempotent jobs with durable result readback, and holds capacity on uncertain teardown until independent cleanup is witnessed.
+
+[For AI agents](#for-ai-agents) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Native CUDA worker](#native-cuda-worker) · [Security notes](#security-notes)
+
+## Features
+
+- **Fail-closed by default**: Ordinary startup serves health and compatibility routes while refusing unconfigured protected lane requests with `503 routing_closed`.
+- **Exact device & workload pinning**: Requests select an exact capability, artifact, and CUDA device UUID — Diffuser refuses unavailable selections (`422 capability_unavailable`) instead of silently substituting another worker or GPU.
+- **Idempotent execution & durable readback**: Submitting with a stable `Idempotency-Key` runs the assigned worker once even across retries; callers can retrieve and verify result digests after worker exit.
+- **Witnessed custody & safe release**: Controller and worker maintain HMAC-authenticated transport/state custody ledgers and independent authority observations. Release transitions assignments to `draining` and holds capacity on uncertain teardown.
+- **Zero-toolkit native CUDA helper**: `native/cuda/add_one.cpp` loads `libcuda.so.1` via `dlopen` with no CUDA SDK headers required, enforces exact `cuDeviceGetUuid_v2` matching, and runs inside an isolated child process launched from a verified `/proc/self/fd` descriptor.
+
+## For AI agents
+
+- Pass the caller's requested workload, artifact, and exact device UUID without substitution.
+- Keep `Idempotency-Key` values stable across retries (`start` vs `retry` in `lanes-ctl`).
+- Inspect existing job state before assuming a lost HTTP reply means work never started.
+- Verify output artifact digests before consuming results; treat `draining` or uncertain assignments as held until released.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client["Tool / Agent / lanes-ctl"] -->|"HTTP + Bearer + Idempotency-Key"| Controller["uai-diffuser (Controller)"]
+    Controller -->|"SQLite Claims & Artifacts"| Store["Durable Store + Custody Ledger"]
+    Controller -->|"HMAC-Signed RPC (Loopback / SSH Tunnel / LAN)"| Worker["uai-diffuser --worker-config"]
+    Worker -->|"PrivateProcess (CPU)"| CPU["Isolated CPU Helper"]
+    Worker -->|"CudaProcess (/proc/self/fd, env_clear)"| CUDA["Native CUDA Helper (libcuda.so.1)"]
+```
+
+## Quickstart
+
+### 1. Build
+
+```sh
+cargo build --release --locked --bin uai-diffuser --bin lanes-ctl
+```
+
+### 2. Ordinary fail-closed startup
+
+Without `--protected-config`, `/v1/diffuser/*` fails closed (`503 routing_closed`, CLI exit `74`):
+
+```sh
+./target/release/uai-diffuser --profile primary --bind localhost:5820 --state-dir ./state
+```
+
+### 3. Protected CPU controller & worker
+
+Provision a `0600` worker config (`worker.json`) and controller config (`controller.json`) with four random 32-byte hex channel keys (`command`, `reply`, `authority`, `custody`) and SHA-256 bearer grant digests:
+
+```sh
+# Terminal 1 — protected CPU worker
+./target/release/uai-diffuser --worker-config ./worker.json --bind 127.0.0.1:5821 --state-dir ./worker-state
+
+# Terminal 2 — protected controller
+./target/release/uai-diffuser --protected-config ./controller.json --bind localhost:5820 --state-dir ./ctrl-state
+```
+
+Drive the full lifecycle with `lanes-ctl` (passing the scoped bearer on stdin):
+
+```sh
+echo "$BEARER" | ./target/release/lanes-ctl diffuser operator 127.0.0.1:5820   "$TENANT" "$PROJECT" "$ACTOR" bearer-stdin discover
+```
+
+## Native CUDA worker
+
+Compile the zero-toolkit CUDA Driver API helper on any Linux host with `g++` and `libcuda.so.1` (tested on RTX 2070 and RTX 3060; supports any exact `GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` UUID):
+
+```sh
+g++ -O2 -std=c++20 -fPIE -pie -o diffuser-cuda-add-one native/cuda/add_one.cpp -ldl
+chmod 0555 diffuser-cuda-add-one
+sha256sum diffuser-cuda-add-one
+```
+
+Configure `backend.kind = "cuda"` with the exact `device_uuid`, `helper_path`, and `helper_sha256`, then launch the worker locally or over an SSH loopback tunnel (`ssh -L 127.0.0.1:5825:127.0.0.1:5825 <gpu-host>`).
+
+## Capability status
+
+| Capability | Status |
+| --- | --- |
+| Fail-closed ordinary startup (`503 routing_closed`) | Verified (`lanes-ctl` exit 74) |
+| Authenticated CPU lifecycle, idempotent retry, durable readback | Verified end-to-end |
+| Authenticated native CUDA execution (`add_one`, exact UUID pin) | Verified end-to-end on RTX 2070 & RTX 3060 |
+| `service-lane/v1` wire compatibility (15 frozen wire rows) | Preserved |
+| Uncertain teardown held state & `412 evidence_stale` refusal | Verified in fixture & route tests |
+
+## Plain-English guide
+
+See [`HOW-IT-WORKS.md`](HOW-IT-WORKS.md) for a non-technical walkthrough of how Diffuser routes, verifies, and protects CPU and GPU work.
+
+## Security notes
+
+- Protected routing is closed by default and activates only with explicit external key and grant configuration.
+- Bearer credentials are supplied via stdin or hashed (`SHA-256`) in config files, never passed as CLI arguments.
+- Native CUDA helpers are verified by ELF digest on an open file descriptor and spawned via `/proc/self/fd` with a cleared environment, `PR_SET_NO_NEW_PRIVS`, `PR_SET_PDEATHSIG`, and resource limits.
+- Public releases exclude private infrastructure addresses, operational receipts, and credentials.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

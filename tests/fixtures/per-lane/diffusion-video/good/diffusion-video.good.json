@@ -1,0 +1,15 @@
+{
+  "api": "service-lane/v1",
+  "lane": "diffusion-video",
+  "job_id": "fake-diffusion-video-001",
+  "cartridge": "default",
+  "timeout_min": 120,
+  "prompt": "Slow dolly across a blue ceramic bowl on a plain table.",
+  "negative": "text overlays",
+  "steps": 20,
+  "seed": 7,
+  "size": { "width": 512, "height": 512 },
+  "fps": 24,
+  "frames": 48,
+  "format": "mp4"
+}

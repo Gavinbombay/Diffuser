@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:655-665","kinds/S03-REF.md:197-205"],"expect":{"detail_has":["no","attempts/1/device.json"]},"id":"dsp-gap-adapter-missing","input":{"device_record":null,"dispatched":true,"kind":"adapter-tts"},"note":"an adapter dispatch with parts but no device log","op":"delivery_gap","source":"kinds/s03/tests/test_dispatch.py:100"}

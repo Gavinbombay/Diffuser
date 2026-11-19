@@ -1,0 +1,1 @@
+{"area":"admission","cites":["admit.py:35,472-473"],"expect":{"code":"unknown-lane","outcome":"refuse","retryable":false,"status":404},"golden_rules":["ADM-404"],"id":"adm-sh-404-tts","input":{"body":{"api":"service-lane/v1","format":"wav","lane":"tts","text":"hi","voice":"default"},"lane_arg":"tts"},"op":"admit","source":"gv/vectors/admission/_shared/http.json:1#sh-404-tts"}

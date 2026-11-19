@@ -1,0 +1,34 @@
+{
+  "spec": "job-spec/v1",
+  "job_id": "wire-tts",
+  "lane": "tts",
+  "cartridge": "fixture",
+  "card_pref": [
+    "warp-2070"
+  ],
+  "items": [
+    {
+      "id": "one",
+      "args": [
+        "[R]"
+      ]
+    },
+    {
+      "id": "two",
+      "args": []
+    }
+  ],
+  "seg_min": 1.5,
+  "deadline_min": 10,
+  "max_segs": 2,
+  "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-tts/out",
+  "entry": "run",
+  "budget_cu": 2,
+  "cap_cu": 3,
+  "gpu_class": "any",
+  "gpu_min_vram_gb": 1,
+  "licence_commercial": true,
+  "licence_id": "fixture",
+  "licence_checked_at": "2026-11-01T00:00:00Z",
+  "use": "internal"
+}

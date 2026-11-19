@@ -1,0 +1,1 @@
+{"area":"admission","cites":["kinds/s03/dispatch.py:280-308"],"expect":{"code":"bad-json","outcome":"refuse","rc":2,"retryable":false},"id":"adm-nonfinite-infinity","input":{"raw":"{\"api\":\"service-lane/v1\",\"lane\":\"stt\",\"x\":Infinity}"},"note":"an Infinity literal","op":"load_job","source":"kinds/s03/dispatch.py:260"}

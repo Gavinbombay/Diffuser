@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:443-452","kinds/S03-REF.md:115-117"],"expect":{"state":"timed_out"},"id":"dsp-rcstate-124","input":{"rc":124},"op":"rc_state","source":"kinds/s03/dispatch.py:443"}

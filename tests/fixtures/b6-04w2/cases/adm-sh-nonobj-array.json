@@ -1,0 +1,1 @@
+{"area":"admission","cites":["admit.py:482-483"],"expect":{"code":"bad-spec","outcome":"refuse","rc":2,"retryable":false,"status":400},"golden_rules":["ADM-NONOBJ"],"id":"adm-sh-nonobj-array","input":{"lane_arg":"stt","raw":"[1,2]"},"op":"load_job","source":"golden/vectors/admission/_shared/json.json:1#sh-nonobj-array"}

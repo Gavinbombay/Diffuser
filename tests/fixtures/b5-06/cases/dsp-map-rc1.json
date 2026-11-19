@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:455-498","kinds/S03-REF.md:120-139"],"expect":{"rc":1,"reason":null,"state":"failed"},"id":"dsp-map-rc1","input":{"observed":{"device_record":null,"dispatched":true,"envelope_code":null,"rc":1,"result_doc":null}},"note":"rc 1 alone is failed","op":"map_attempt","source":"kinds/s03/dispatch.py:455"}

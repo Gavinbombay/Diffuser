@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:670-681"],"expect":{"ok":true},"id":"dsp-rundir-absent","input":{"run_dir":"absent"},"note":"an absent run directory is made","op":"fresh_run_dir","source":"kinds/s03/dispatch.py:670"}

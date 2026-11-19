@@ -1,0 +1,23 @@
+{
+  "api": "service-lane/v1",
+  "lane": "diffusion-image",
+  "job_id": "fake-diffusion-image-001",
+  "cartridge": "default",
+  "timeout_min": 45,
+  "prefer": [
+    "echo-3060",
+    "warp-2070",
+    "rook-4060",
+    "colab-l4"
+  ],
+  "prompt": "A blue ceramic bowl on a plain table.",
+  "negative": "",
+  "steps": 20,
+  "seed": 42,
+  "size": {
+    "width": 512,
+    "height": 512
+  },
+  "format": "png",
+  "count": 2
+}

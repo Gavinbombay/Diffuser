@@ -1,0 +1,1 @@
+{"area":"admission","cites":["admit.py:128-131"],"expect":{"code":"bad-json","outcome":"refuse","rc":2,"retryable":false,"status":400},"golden_rules":["ADM-BADJSON","ADM-UTF8"],"id":"adm-sh-badjson-utf8","input":{"lane_arg":"stt","raw_utf8":[123,34,97,117,100,105,111,34,58,34,255,34,125]},"op":"load_job","source":"golden/vectors/admission/_shared/json.json:1#sh-badjson-utf8"}

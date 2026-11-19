@@ -1,0 +1,14 @@
+{
+  "api": "service-lane/v1",
+  "lane": "music-sfx",
+  "job_id": "fake-music-sfx-001",
+  "cartridge": "default",
+  "timeout_min": 30,
+  "prompt": "Warm synth pad with soft rim clicks, 30 second bed.",
+  "duration_seconds": 301,
+  "bpm": 96,
+  "key": "Amin",
+  "seed": 7,
+  "stems": true,
+  "format": "wav"
+}

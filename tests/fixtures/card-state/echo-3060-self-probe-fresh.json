@@ -1,0 +1,36 @@
+{
+ "schema_version": "card-state/v1",
+ "card": "echo-3060",
+ "worker_id": "echo-3060",
+ "ts": "2026-10-31T12:40:00-02:30",
+ "epoch": 1793459400,
+ "state": "idle",
+ "util": 0,
+ "watts": 16.2,
+ "vram_mb": 11978,
+ "vram_total_mb": 12288,
+ "ram_mb": 31744,
+ "backends": [
+  "cycles-optix",
+  "wan22-5b",
+  "ace-step"
+ ],
+ "capacity": {
+  "source": "nvidia-smi-ssh-echo-gpu",
+  "at": "2026-10-31T12:40:00-02:30",
+  "unknown": []
+ },
+ "busy": {
+  "by": "none",
+  "ref": null
+ },
+ "proof_source": "self-probe",
+ "self_probe": {
+  "worker_id": "echo-3060",
+  "epoch": 1793459370,
+  "util": 0,
+  "watts": 16.2,
+  "source": "nvidia-smi-host"
+ },
+ "vram_gb": 12
+}

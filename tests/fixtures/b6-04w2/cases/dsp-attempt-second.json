@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:684-700","kinds/S03-REF.md:205-209"],"expect":{"number":2},"id":"dsp-attempt-second","input":{"run_dir":{"files":{"router/attempts/1/device.json":{"text":"{}"}}}},"note":"one attempt on disk: the next number is 2","op":"next_attempt_number","source":"kinds/s03/dispatch.py:684"}

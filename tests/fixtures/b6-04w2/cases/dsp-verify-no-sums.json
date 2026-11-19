@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:602-637","kinds/S03-REF.md:141-175"],"expect":{"refuse":{"code":"artifact-mismatch","detail_has":["SHA256SUMS"],"retryable":false}},"id":"dsp-verify-no-sums","input":{"lane":"tts","tree":{"parts/p1/speech.wav":{"zeros":100}}},"note":"a part with no SHA256SUMS","op":"verify_delivery","source":"kinds/s03/dispatch.py:518"}

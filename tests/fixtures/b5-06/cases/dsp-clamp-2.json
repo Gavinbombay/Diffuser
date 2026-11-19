@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:435-440","kinds/S03-REF.md:115-118"],"expect":{"rc":2},"id":"dsp-clamp-2","input":{"rc":2},"note":"the attempts.rc enum is exactly {0, 1, 2, 124}","op":"clamp_rc","source":"kinds/s03/dispatch.py:435"}

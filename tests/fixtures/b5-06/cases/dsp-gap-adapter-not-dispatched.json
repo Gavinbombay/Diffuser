@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:655-665","kinds/S03-REF.md:197-205"],"expect":{"gap_null":true},"id":"dsp-gap-adapter-not-dispatched","input":{"device_record":null,"dispatched":false,"kind":"adapter-tts"},"note":"nothing dispatched: no gap to report","op":"delivery_gap","source":"kinds/s03/tests/test_dispatch.py:100"}

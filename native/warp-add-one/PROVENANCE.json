@@ -1,0 +1,23 @@
+{
+  "actual_rust_consumer_probe_cases": 5,
+  "arch": "Linux x86-64 ELF PIE",
+  "artifact_sha256": "2b2813c19922d099d83a46921f1e59846e789651fe1f97056f82c55f4f104496",
+  "base": "f2029f41e0c1f73366dd71333fd21be547282036",
+  "composition_sha256": "2930caa545ea48e2620b535d421e149e10060e734dc139e098786d7024acc971",
+  "diff_sha256": "0cd69028908f07c2c7a106f55f0e72a34a3407ebcd4e05a7ce3eda28ca823b9d",
+  "hardware_tested_here": false,
+  "historical_hardware_receipt_sha256": "3fa290120b640e886291f5ad55286e0aaa243030872a53a43b718ca18a7a84cb",
+  "inherited_closed_router_replays": 2,
+  "minimum_observed_symbol_versions": {
+    "glibc": "2.34",
+    "libstdc++": "3.4.32"
+  },
+  "native_cases_per_rebuild": 28,
+  "native_rebuilds": 2,
+  "parent_delivery_entries": 13096,
+  "parent_map_sha256": "1cb948d061fcf9f72a540542aae7bebaf4a9d73f7009fcc6280bdecff78db130",
+  "production_route_changed": false,
+  "qualification": "blocked at protected startup/admission; offline component only",
+  "uuid": "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5",
+  "verified_inherited_standalone_host_paths": 304
+}

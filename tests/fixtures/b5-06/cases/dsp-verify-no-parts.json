@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:602-637","kinds/S03-REF.md:141-175"],"expect":{"rows":[]},"id":"dsp-verify-no-parts","input":{"lane":"tts","tree":{}},"note":"no parts directory at all: nothing verified, nothing refused","op":"verify_delivery","source":"kinds/s03/dispatch.py:602"}

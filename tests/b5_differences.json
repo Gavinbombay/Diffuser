@@ -1,0 +1,105 @@
+{
+  "adm-jobid-minted": {
+    "actual": "rb-<stamp>",
+    "rule": "Existing native job identifiers retain the rb timestamp form."
+  },
+  "dsp-part-single": {
+    "actual": {
+      "name": "warp-2070-bake"
+    },
+    "rule": "Whole-job part directories retain the existing -bake suffix."
+  },
+  "dsp-part-unchunked": {
+    "actual": {
+      "name": "warp-2070-bake"
+    },
+    "rule": "Whole-job part directories retain the existing -bake suffix."
+  },
+  "dsp-whynot-disabled": {
+    "actual": {
+      "why": [
+        "disabled in registry: maintenance"
+      ]
+    },
+    "rule": "Existing refusal text retains its space after the colon."
+  },
+  "dsp-whynot-two-reasons": {
+    "actual": {
+      "why": [
+        "disabled in registry: maintenance",
+        "does not serve stt"
+      ]
+    },
+    "rule": "Existing refusal text retains its space after the colon."
+  },
+  "dsp-verify-no-parts": {
+    "actual": {
+      "refuse": {
+        "code": "artifact-mismatch",
+        "retryable": false
+      }
+    },
+    "rule": "A successful delivery must contain at least one contract artifact."
+  },
+  "lim-rl-dv-done-dup-paths": {
+    "actual": {
+      "outcome": "failed",
+      "reason": "duplicate-artifact"
+    },
+    "rule": "The existing E2 merge rejects duplicate artifact paths before counting frames."
+  },
+  "lim-rl-dv-inconsistent": {
+    "actual": {
+      "outcome": "failed",
+      "reason": "artifact-count-exceeded"
+    },
+    "rule": "The result schema permits at most eight artifacts and E2 checks this before frame measurements."
+  },
+  "lim-rl-dv-over-one-frame": {
+    "actual": {
+      "outcome": "failed",
+      "reason": "artifact-count-exceeded"
+    },
+    "rule": "The result schema permits at most eight artifacts and E2 checks this before frame measurements."
+  },
+  "adm-sh-badjson-dupkey": {
+    "actual": {
+      "outcome": "refuse",
+      "code": "bad-json",
+      "rc": 2,
+      "retryable": false,
+      "status": 422
+    },
+    "rule": "Existing opened-lane HTTP assertions require status 422 for malformed JSON."
+  },
+  "adm-sh-badjson-nan": {
+    "actual": {
+      "outcome": "refuse",
+      "code": "bad-json",
+      "rc": 2,
+      "retryable": false,
+      "status": 422
+    },
+    "rule": "Existing opened-lane HTTP assertions require status 422 for malformed JSON."
+  },
+  "adm-sh-badjson-trailing": {
+    "actual": {
+      "outcome": "refuse",
+      "code": "bad-json",
+      "rc": 2,
+      "retryable": false,
+      "status": 422
+    },
+    "rule": "Existing opened-lane HTTP assertions require status 422 for malformed JSON."
+  },
+  "adm-sh-badjson-utf8": {
+    "actual": {
+      "outcome": "refuse",
+      "code": "bad-json",
+      "rc": 2,
+      "retryable": false,
+      "status": 422
+    },
+    "rule": "Existing opened-lane HTTP assertions require status 422 for malformed JSON."
+  }
+}

@@ -1,0 +1,182 @@
+[
+  {
+    "path": "diffusion-image/bad/diffusion-image-format.json",
+    "sha256": "7b1e2c17607ec9b2109d60e08754f17d7e6fe1c2c9f6eec02a866ef6d251b628"
+  },
+  {
+    "path": "diffusion-image/bad/diffusion-image-missing-size.json",
+    "sha256": "058325f8ee9b295fb72a38f67dfb77993913c3ad1e1f2fac37480acf5ba3855d"
+  },
+  {
+    "path": "diffusion-image/bad/diffusion-image-steps-range.json",
+    "sha256": "d7babcfd9b5ca582fc3f8df7dde31bc7ec7763abf93b56d836f605a579994879"
+  },
+  {
+    "path": "diffusion-image/bad/diffusion-image-unknown-field.json",
+    "sha256": "f3a0170fa09893ccd09966bab4f7dc19b0e8e9c2087fc278f5fe674542be414e"
+  },
+  {
+    "path": "diffusion-image/bad/diffusion-image-width-1537.json",
+    "sha256": "c2dd735f2dfadd92ddf9d4e93d8ae6e516941602f25564d268c9dfbef00d7505"
+  },
+  {
+    "path": "diffusion-image/good/diffusion-image.boundary-max.json",
+    "sha256": "f5878b6779dd7b269f11ae27fa9db29bc68b6d96fcb92efff4d4020f46907ddc"
+  },
+  {
+    "path": "diffusion-image/good/diffusion-image.good.json",
+    "sha256": "a07fa878e9f97041e6514f57d52865c5bdccfeff13cfc483b1fe1e3870cb9c97"
+  },
+  {
+    "path": "diffusion-image/semantic/diffusion-image-width-513.json",
+    "sha256": "3ca577228d2cd3ca60e6b28e7a0e6dce7b3487161b8786458f4ba2ff28132fb5"
+  },
+  {
+    "path": "diffusion-video/bad/diffusion-video-frames-481.json",
+    "sha256": "f4d7e61c1ad4743a13f50e827e8aeda8749f2f9eec3521f8f24ce6ed694a3e44"
+  },
+  {
+    "path": "diffusion-video/bad/diffusion-video-frames-min.json",
+    "sha256": "14d0d69dfe07a1a6c89c3ffb475f73b677b48bf61c76ef827e1dac6898889bc5"
+  },
+  {
+    "path": "diffusion-video/good/diffusion-video.boundary-max.json",
+    "sha256": "82eceaf0d939662efc5be8ddfc4dd661026f7d087dc616a3f91b88fcc59d4fca"
+  },
+  {
+    "path": "diffusion-video/good/diffusion-video.good.json",
+    "sha256": "38417c592b68b49f09b7d8c82d6a133481fca70a13e20df692a38dbe75a06d3a"
+  },
+  {
+    "path": "diffusion-video/semantic/diffusion-video-width-513.json",
+    "sha256": "6dd4da7a329852fa75c7d0278791e9c05e4689e124510057b31feec51d6e25e7"
+  },
+  {
+    "path": "music-sfx/bad/music-sfx-bpm-301.json",
+    "sha256": "6b1bb097c3758bb9798076cedb4d743c616f7f2bc3e91fefa8dc38fdb6a0db08"
+  },
+  {
+    "path": "music-sfx/bad/music-sfx-duration-range.json",
+    "sha256": "409d6d1ac0cf7d3919d9e2999784be7c27594eb709ac5413784da0e8f54574b1"
+  },
+  {
+    "path": "music-sfx/good/music-sfx.boundary-max.json",
+    "sha256": "7286a09eb29a18501372a0bf2ee0333790bd41e4c5c2250b9998f9ac9d1a8936"
+  },
+  {
+    "path": "music-sfx/good/music-sfx.good.json",
+    "sha256": "f5990e411de2a5735b5aedf4192280f2dfa5365f450ddea80f6ce3bb403e07a0"
+  },
+  {
+    "path": "render-blender/bad/render-blender-blend-relative.json",
+    "sha256": "e6001906fd635555aaae02dcf21d85c0212d7758f3eedc1cbec43b60cd9de7fe"
+  },
+  {
+    "path": "render-blender/bad/render-blender-frames-1001.json",
+    "sha256": "df8590041458d7d978fafa7d780ac63f77ed25564c6d898334ceee34f72cb031"
+  },
+  {
+    "path": "render-blender/bad/render-blender-frames-chars.json",
+    "sha256": "f1068da054a5033eecdb62ea41decbc64319a3996978e1fa4b5e2dd0a03d51da"
+  },
+  {
+    "path": "render-blender/bad/render-blender-timeout-range.json",
+    "sha256": "a1ea325e281f2df01c1e3c35946086e7717cb42a5531c544a00ac80f9c684940"
+  },
+  {
+    "path": "render-blender/good/render-blender.boundary-max.json",
+    "sha256": "7c800cc00506b10111772529f9823c38af846b0af628b7e76bfe7236c59f2e67"
+  },
+  {
+    "path": "render-blender/good/render-blender.good.json",
+    "sha256": "b0279cae53943b136460dbb7eb60847b38548c3888917ced2468cc119f95c30d"
+  },
+  {
+    "path": "stt/bad/stt-bad-format.json",
+    "sha256": "d1540861874ae0182f8be89fd3cc692ce8362523ad76d41d8f733dc6a132d93f"
+  },
+  {
+    "path": "stt/bad/stt-max-audio-seconds-3601.json",
+    "sha256": "ba2a773401b898c4a0f4de60c6b654b7c0e3a2a8c7c43784120d30689f40b5ad"
+  },
+  {
+    "path": "stt/bad/stt-missing-audio.json",
+    "sha256": "95c8fa9de0212561fcbe26a0adcd5250d25bd28acda82e871d2ef7cf2ed11d89"
+  },
+  {
+    "path": "stt/good/stt.boundary-max.json",
+    "sha256": "3cd9f5e3bea10611c3cbbd7162d8d6fcf3f29c4327f67aa1f87064e8583d4a4f"
+  },
+  {
+    "path": "stt/good/stt.good.json",
+    "sha256": "f7d8d907055f8549848683b153474d6652e7e5f7856bef6db5e1592e666d6895"
+  },
+  {
+    "path": "tts/bad/tts-bad-format.json",
+    "sha256": "c73b31169b070bf1fde7faa9e615030302d3c7d16dc8c4b3328fc8c062e74e3c"
+  },
+  {
+    "path": "tts/bad/tts-bad-job-id.json",
+    "sha256": "1589939ac8c93b43b4431f5a6afe4f151832ad2cc4b9cc17881d06a15eef4372"
+  },
+  {
+    "path": "tts/bad/tts-missing-text.json",
+    "sha256": "cecd12ee62e9af5841bc32b7068e42a62bbc6bcf7c649d45163b1b3a40cbe368"
+  },
+  {
+    "path": "tts/bad/tts-null-optional.json",
+    "sha256": "acb6965524efac853db526da1037161b3b1a69d2b263f854dda9cfb7b03ca2eb"
+  },
+  {
+    "path": "tts/bad/tts-prefer-6.json",
+    "sha256": "11a1c6ed676326078ad98d13d9bae810d3bf12b85a5b0cbe12cbe06fe52ecaf4"
+  },
+  {
+    "path": "tts/bad/tts-prefer-duplicate.json",
+    "sha256": "c9f99300833fc34c1c1cd282d708f4697478d6bb8fd58313f606b20dae75df8e"
+  },
+  {
+    "path": "tts/bad/tts-seed-bool.json",
+    "sha256": "3493ad04c0d89f6c7f32ed133d620e8298751bb93329c520b2823518e74776d7"
+  },
+  {
+    "path": "tts/bad/tts-seed-range.json",
+    "sha256": "79d6ce9ee99221fafa05b30f24a81bb90c56d8d292fd9f73328d00cca347e8ec"
+  },
+  {
+    "path": "tts/bad/tts-text-10001.json",
+    "sha256": "f6b402de80b4fc416fdb4d794ffd8b9af267a049d95c94ff7c40676ba09aed62"
+  },
+  {
+    "path": "tts/bad/tts-timeout-range.json",
+    "sha256": "8e275dcbda74869b8fcd8675d9e9e4d9759c0218281a27e694fc57d00a26e3d5"
+  },
+  {
+    "path": "tts/bad/tts-unknown-field.json",
+    "sha256": "3e9a1cd53d765177ff94de6e8bd9214f89a9306c3b4cc6fce9a934a54d8d6143"
+  },
+  {
+    "path": "tts/bad/tts-unknown-lane.json",
+    "sha256": "7461db69aa80cb6d2711e3a071ceb4e1b33d21d740860d8ea8d03f04e5fb8f91"
+  },
+  {
+    "path": "tts/bad/tts-wrong-api.json",
+    "sha256": "afc3be1f22ccfb28ef2e7e3c1bb6e580d5a849ef986e545b1e661936420cebeb"
+  },
+  {
+    "path": "tts/good/tts.boundary-max.json",
+    "sha256": "0ef8630b416dd183fe50ec7d11af31b8a201cbfbce4c40f6e5801cf5b6f97793"
+  },
+  {
+    "path": "tts/good/tts.good.json",
+    "sha256": "5577fd915cfec517b628c12e6d6e1aa8daa6abed6cd145d9f8325e6e0838b001"
+  },
+  {
+    "path": "tts/semantic/tts-rate-23000.json",
+    "sha256": "479cbc537883cca532c14fa0367262a89f6fd70b5175519ce068f99a1b1c3967"
+  },
+  {
+    "path": "tts/semantic/tts-voice-unknown.json",
+    "sha256": "9dfa3c1f5cf1d552149bd03ec4407b94402fb7250e5d243e2381c12182735385"
+  }
+]

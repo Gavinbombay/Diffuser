@@ -1,0 +1,27 @@
+{
+ "schema_version": "card-state/v1",
+ "card": "warp-2070",
+ "worker_id": "warp-2070",
+ "ts": "2026-10-31T12:40:00-02:30",
+ "epoch": 1793459400,
+ "state": "idle",
+ "util": 3,
+ "watts": 11.0,
+ "vram_mb": 7972,
+ "vram_total_mb": 8192,
+ "ram_mb": 64000,
+ "backends": [
+  "cycles-optix",
+  "wan22-5b"
+ ],
+ "capacity": {
+  "source": "nvidia-smi-local",
+  "at": "2026-10-31T12:40:00-02:30",
+  "unknown": []
+ },
+ "busy": {
+  "by": "none",
+  "ref": null
+ },
+ "vram_gb": 8
+}

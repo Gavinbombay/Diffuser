@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:655-665","kinds/S03-REF.md:197-205"],"expect":{"gap_null":true},"id":"dsp-gap-exec-exempt","input":{"device_record":null,"dispatched":true,"kind":"exec"},"note":"an exec worker writes no device log; the router writes it","op":"delivery_gap","source":"kinds/s03/tests/test_dispatch.py:100"}

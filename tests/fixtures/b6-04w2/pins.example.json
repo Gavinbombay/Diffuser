@@ -1,0 +1,314 @@
+{
+  "kind": "cartridge-catalog/v1",
+  "note": "Offline reference pins file for the lane enable gate (job glm-lanes-router-lane-enable-gate-q7-20261030; GAPS-vs-S01.md items 5 and 6). Two halves. (1) `cartridges`: the placeholder cartridge catalog verbatim from the registry slice's catalog.example.json, unchanged, so cartctl.py still validates this file -- its validate reads kind and cartridges only. (2) `lane_pins`: this slice's per-lane pin records -- one S01 Pin record (kit schemas/cartridge.schema.json, service.rs:73-79) per admission lane, each marked `model: OPEN-Q7` because the owner's Q7 (which model serves the lane) is unanswered, pointing at the placeholder cartridge, and carrying `owner_approval: null` because no owner approval exists yet. render-blender is not an admission lane and stays exactly as S01 has it: an id-list pin (blender-4.5.14-cycles, main.rs:33), no Pin record. No model is chosen here; every model field stays the placeholder OPEN-Q7 until the owner answers Q7. Nothing behind this file is downloadable, loadable, deployed or bound; every hash, licence and version is a documented placeholder (CARTRIDGES.md in the registry slice). No token appears anywhere in this file.",
+  "cartridges": [
+    {
+      "id": "blender-4.5.14-cycles",
+      "lane": "render-blender",
+      "version": "4.5.14",
+      "licence": "placeholder",
+      "sha256": "096e63f5567fdf5efba46fa3cb2c48c9731f0272747627f3595e4bcf775ff9ba",
+      "vram_gb_min": 1,
+      "load_seconds_est": 10,
+      "params": {
+        "schema": "render-blender.params.schema.json"
+      },
+      "default": true,
+      "notes": "placeholder entry: id is the S01 render pin (main.rs:33); version 4.5.14 comes from that pin id; no pin record because the S01 render path has none (id-list pinning, main.rs:33; the Pin record serves the admission lanes, service.rs:73-79); no Blender artifact exists here"
+    },
+    {
+      "id": "tts-placeholder-v1",
+      "lane": "tts",
+      "version": "1",
+      "licence": "placeholder",
+      "sha256": "6e3ab6b90e1a174ad2576b1d2a90ca2518dae46ea1d3080955c4ce1df90a61f7",
+      "vram_gb_min": 4,
+      "load_seconds_est": 20,
+      "params": {
+        "schema": "tts.params.schema.json"
+      },
+      "pin": {
+        "id": "tts-placeholder-v1",
+        "sha256": "317e938a489b10da179b9cc1110357cb16d988856bb3ad7908862f9c2828c88c",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "default": true,
+      "notes": "placeholder entry: fake hashes, placeholder licence/version/vram/load; pin bounds are the S01 fake pin value set (service.rs:81-84)"
+    },
+    {
+      "id": "stt-placeholder-v1",
+      "lane": "stt",
+      "version": "1",
+      "licence": "placeholder",
+      "sha256": "07dd96ea42f093d80470f13d8111227a256222592ec3389e803803175fca2343",
+      "vram_gb_min": 4,
+      "load_seconds_est": 15,
+      "params": {
+        "schema": "stt.params.schema.json"
+      },
+      "pin": {
+        "id": "stt-placeholder-v1",
+        "sha256": "f9eec27ab16bee422cce7c485214abaed07ba27d1c164ae0b0af04c036042358",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "default": true,
+      "notes": "placeholder entry: lane defined but unserved in S01 (service.rs:9); metadata is forward-looking only"
+    },
+    {
+      "id": "diffusion-image-placeholder-v1",
+      "lane": "diffusion-image",
+      "version": "1",
+      "licence": "placeholder",
+      "sha256": "d04a39bdb5ff64bf9d648c9b8c7830a45b7e13a915938e4b4a263a1f21c51330",
+      "vram_gb_min": 6,
+      "load_seconds_est": 30,
+      "params": {
+        "schema": "diffusion-image.params.schema.json"
+      },
+      "pin": {
+        "id": "diffusion-image-placeholder-v1",
+        "sha256": "80e2fb7b0c085c63dbd03f3cf92401afaa952af796d8d0d2ca7362609cc72807",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "default": true,
+      "notes": "placeholder entry: fake hashes, placeholder licence/version/vram/load; pin bounds are the S01 fake pin value set (service.rs:81-84)"
+    },
+    {
+      "id": "diffusion-video-placeholder-v1",
+      "lane": "diffusion-video",
+      "version": "1",
+      "licence": "placeholder",
+      "sha256": "d78bba6897339a0a6d5425a3550b27996a7f965c4821981c804c57db3731903f",
+      "vram_gb_min": 8,
+      "load_seconds_est": 45,
+      "params": {
+        "schema": "diffusion-video.params.schema.json"
+      },
+      "pin": {
+        "id": "diffusion-video-placeholder-v1",
+        "sha256": "f880d4a677e0c78d860b30e99be64b392cfe86f0946713d050544959e798e623",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "default": true,
+      "notes": "placeholder entry: lane defined but unserved in S01 (service.rs:9); metadata is forward-looking only"
+    },
+    {
+      "id": "music-sfx-placeholder-v1",
+      "lane": "music-sfx",
+      "version": "1",
+      "licence": "placeholder",
+      "sha256": "9777d6456dba70ed3584ffa707e5ff5ef934728149f80bee11a9354ff520ac07",
+      "vram_gb_min": 6,
+      "load_seconds_est": 25,
+      "params": {
+        "schema": "music-sfx.params.schema.json"
+      },
+      "pin": {
+        "id": "music-sfx-placeholder-v1",
+        "sha256": "d3b024fb2305360d3d6992eeaff5268cd99b0a8bf5410e5d3bf222cc68551bdc",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "default": true,
+      "notes": "placeholder entry: lane defined but unserved in S01 (service.rs:9); metadata is forward-looking only"
+    }
+  ],
+  "lane_pins": [
+    {
+      "lane": "render-blender",
+      "pin_ids": [
+        "blender-4.5.14-cycles"
+      ],
+      "note": "not an admission lane: S01 pins render-blender by plain id list (main.rs:33, RB_CARTRIDGES) and has no Pin record for it (Pin serves the admission lanes, service.rs:73-79); outside this gate (service.rs:9 admits only tts and diffusion-image; render runs the legacy path)"
+    },
+    {
+      "lane": "tts",
+      "model": "OPEN-Q7",
+      "cartridge": "tts-placeholder-v1",
+      "pin": {
+        "id": "tts-placeholder-v1",
+        "sha256": "317e938a489b10da179b9cc1110357cb16d988856bb3ad7908862f9c2828c88c",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "owner_approval": null,
+      "note": "model choice open pending the owner's Q7; cartridge and pin are the shipped placeholders (licence 'placeholder', artifact sha256 = sha256('placeholder-cartridge/<id>'), pin sha256 = sha256(lane), the S01 fake-pin formula service.rs:82); no owner approval recorded yet"
+    },
+    {
+      "lane": "stt",
+      "model": "OPEN-Q7",
+      "cartridge": "stt-placeholder-v1",
+      "pin": {
+        "id": "stt-placeholder-v1",
+        "sha256": "f9eec27ab16bee422cce7c485214abaed07ba27d1c164ae0b0af04c036042358",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "owner_approval": null,
+      "note": "model choice open pending the owner's Q7; cartridge and pin are the shipped placeholders (licence 'placeholder', artifact sha256 = sha256('placeholder-cartridge/<id>'), pin sha256 = sha256(lane), the S01 fake-pin formula service.rs:82); no owner approval recorded yet"
+    },
+    {
+      "lane": "diffusion-image",
+      "model": "OPEN-Q7",
+      "cartridge": "diffusion-image-placeholder-v1",
+      "pin": {
+        "id": "diffusion-image-placeholder-v1",
+        "sha256": "80e2fb7b0c085c63dbd03f3cf92401afaa952af796d8d0d2ca7362609cc72807",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "owner_approval": null,
+      "note": "model choice open pending the owner's Q7; cartridge and pin are the shipped placeholders (licence 'placeholder', artifact sha256 = sha256('placeholder-cartridge/<id>'), pin sha256 = sha256(lane), the S01 fake-pin formula service.rs:82); no owner approval recorded yet"
+    },
+    {
+      "lane": "diffusion-video",
+      "model": "OPEN-Q7",
+      "cartridge": "diffusion-video-placeholder-v1",
+      "pin": {
+        "id": "diffusion-video-placeholder-v1",
+        "sha256": "f880d4a677e0c78d860b30e99be64b392cfe86f0946713d050544959e798e623",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "owner_approval": null,
+      "note": "model choice open pending the owner's Q7; cartridge and pin are the shipped placeholders (licence 'placeholder', artifact sha256 = sha256('placeholder-cartridge/<id>'), pin sha256 = sha256(lane), the S01 fake-pin formula service.rs:82); no owner approval recorded yet"
+    },
+    {
+      "lane": "music-sfx",
+      "model": "OPEN-Q7",
+      "cartridge": "music-sfx-placeholder-v1",
+      "pin": {
+        "id": "music-sfx-placeholder-v1",
+        "sha256": "d3b024fb2305360d3d6992eeaff5268cd99b0a8bf5410e5d3bf222cc68551bdc",
+        "voices": [
+          "default"
+        ],
+        "rates": [
+          16000,
+          22050,
+          24000,
+          44100,
+          48000
+        ],
+        "max_width": 1536,
+        "max_height": 1536,
+        "max_steps": 100,
+        "max_text_chars": 10000
+      },
+      "owner_approval": null,
+      "note": "model choice open pending the owner's Q7; cartridge and pin are the shipped placeholders (licence 'placeholder', artifact sha256 = sha256('placeholder-cartridge/<id>'), pin sha256 = sha256(lane), the S01 fake-pin formula service.rs:82); no owner approval recorded yet"
+    }
+  ]
+}

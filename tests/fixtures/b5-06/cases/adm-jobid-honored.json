@@ -1,0 +1,1 @@
+{"area":"admission","cites":["kinds/s03/dispatch.py:311-316"],"expect":{"job_id":"abc-123"},"id":"adm-jobid-honored","input":{"job":{"job_id":"abc-123","lane":"stt"}},"note":"a job_id already in the document is used verbatim","op":"job_id_of","source":"kinds/s03/dispatch.py:311"}

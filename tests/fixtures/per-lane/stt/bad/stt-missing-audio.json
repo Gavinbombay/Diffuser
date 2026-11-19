@@ -1,0 +1,13 @@
+{
+  "api": "service-lane/v1",
+  "lane": "stt",
+  "job_id": "fake-stt-001",
+  "cartridge": "default",
+  "timeout_min": 20,
+  "format": "wav",
+  "language": "en-CA",
+  "hints": "speaker names: lane, owner",
+  "max_alternatives": 2,
+  "diarize": false,
+  "max_audio_seconds": 1800
+}

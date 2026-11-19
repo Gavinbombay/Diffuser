@@ -1,0 +1,135 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "lanes-router/specs/c4-pull-request.schema.json",
+ "title": "box agent long-poll: POST /v1/agent/pull body",
+ "type": "object",
+ "required": [
+  "schema_version",
+  "agent_id",
+  "worker_id",
+  "lanes",
+  "wait_s",
+  "state_epoch"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "schema_version": {
+   "const": "agent-pull/v1"
+  },
+  "agent_id": {
+   "type": "string",
+   "pattern": "^[a-z0-9-]{3,64}$"
+  },
+  "worker_id": {
+   "const": "colab-l4"
+  },
+  "lanes": {
+   "type": "array",
+   "minItems": 1,
+   "uniqueItems": true,
+   "items": {
+    "enum": [
+     "render-blender",
+     "diffusion-video",
+     "diffusion-image",
+     "tts",
+     "stt",
+     "music-sfx"
+    ]
+   }
+  },
+  "wait_s": {
+   "type": "integer",
+   "minimum": 1,
+   "maximum": 60
+  },
+  "state_epoch": {
+   "type": "integer",
+   "minimum": 0
+  },
+  "gpu_class": {
+   "enum": [
+    "any",
+    "l4",
+    "a100",
+    "h100",
+    "g4"
+   ],
+   "description": "optional, Google Ultra G1; colab only; default any"
+  },
+  "report": {
+   "type": "object",
+   "description": "outcome of the previous lease, omitted on first pull",
+   "required": [
+    "lease_id",
+    "job_id",
+    "segment",
+    "exit_code",
+    "done_items"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "lease_id": {
+     "type": "string"
+    },
+    "job_id": {
+     "type": "string",
+     "pattern": "^[a-z0-9][a-z0-9._-]{2,95}$"
+    },
+    "segment": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "exit_code": {
+     "enum": [
+      0,
+      1,
+      75
+     ]
+    },
+    "session_lost": {
+     "type": "boolean"
+    },
+    "done_items": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ },
+ "examples": [
+  {
+   "schema_version": "agent-pull/v1",
+   "agent_id": "agent-123",
+   "worker_id": "colab-l4",
+   "lanes": [
+    "tts"
+   ],
+   "wait_s": 1,
+   "state_epoch": 1000
+  },
+  {
+   "schema_version": "agent-pull/v1",
+   "agent_id": "agent-123",
+   "worker_id": "colab-l4",
+   "lanes": [
+    "tts"
+   ],
+   "wait_s": 1,
+   "state_epoch": 1000,
+   "gpu_class": "l4",
+   "report": {
+    "lease_id": "lease-123",
+    "job_id": "job-123",
+    "segment": 0,
+    "exit_code": 75,
+    "done_items": [
+     "one"
+    ],
+    "session_lost": true
+   }
+  }
+ ]
+}

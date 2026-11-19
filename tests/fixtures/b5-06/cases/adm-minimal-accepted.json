@@ -1,0 +1,1 @@
+{"area":"admission","cites":["kinds/s03/dispatch.py:280-308"],"expect":{"lane":"stt","outcome":"accepted"},"id":"adm-minimal-accepted","input":{"raw":"{\"api\":\"service-lane/v1\",\"lane\":\"stt\"}"},"note":"the smallest document the boundary accepts: api const plus a served lane","op":"load_job","source":"kinds/s03/dispatch.py:308"}

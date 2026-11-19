@@ -1,0 +1,1 @@
+{"area":"admission","cites":["kinds/s03/dispatch.py:280-308"],"expect":{"code":"unknown-lane","outcome":"refuse","rc":2,"retryable":false},"id":"adm-lane-unknown","input":{"raw":"{\"api\":\"service-lane/v1\",\"lane\":\"weird-lane\"}"},"note":"a lane outside the six contract lanes","op":"load_job","source":"kinds/s03/dispatch.py:305"}

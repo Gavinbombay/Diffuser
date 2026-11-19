@@ -1,0 +1,1 @@
+{"area":"admission","cites":["admit.py:126-133"],"expect":{"code":"bad-json","outcome":"refuse","rc":2,"retryable":false,"status":400},"golden_rules":["ADM-BADJSON"],"id":"adm-sh-badjson-trailing","input":{"lane_arg":"stt","raw":"{\"api\":\"service-lane/v1\"}x"},"op":"load_job","source":"golden/vectors/admission/_shared/json.json:1#sh-badjson-trailing"}

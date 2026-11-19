@@ -1,0 +1,16 @@
+{
+  "api": "service-lane/v1",
+  "lane": "tts",
+  "job_id": "fake-tts-001",
+  "cartridge": "default",
+  "timeout_min": 45,
+  "prefer": [
+    "echo-3060",
+    "echo-3060"
+  ],
+  "text": "This is an offline design fixture.",
+  "voice": "default",
+  "format": "wav",
+  "sample_rate": 24000,
+  "seed": 42
+}

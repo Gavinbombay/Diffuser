@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:670-681"],"expect":{"refuse":{"code":"bad-spec","detail_has":["exists and is not empty"],"retryable":false}},"id":"dsp-rundir-nonempty","input":{"run_dir":{"files":{"stray.txt":{"text":"x"}}}},"note":"a non-empty run directory is refused","op":"fresh_run_dir","source":"kinds/s03/dispatch.py:670"}

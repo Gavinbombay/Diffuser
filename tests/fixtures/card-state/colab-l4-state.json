@@ -1,0 +1,63 @@
+{
+ "schema_version": "card-state/v1",
+ "card": "colab-l4",
+ "worker_id": "colab-l4",
+ "ts": "2026-10-31T12:40:00-02:30",
+ "epoch": 1793459400,
+ "state": "busy",
+ "util": "unknown",
+ "watts": "unknown",
+ "vram_mb": "unknown",
+ "vram_total_mb": 23034,
+ "ram_mb": 53248,
+ "backends": [
+  "kokoro",
+  "whisper-turbo",
+  "qwen-image",
+  "flux-schnell",
+  "ace-step",
+  "cycles-optix"
+ ],
+ "capacity": {
+  "source": "colab-l4-run-status",
+  "at": "2026-10-31T12:40:00-02:30",
+  "unknown": [
+   "util",
+   "watts",
+   "vram_mb"
+  ]
+ },
+ "busy": {
+  "by": "colab-job",
+  "ref": "gpu-audit-ep01-scratch-vo-kokoro"
+ },
+ "seat": {
+  "held": true,
+  "by": "colab-l4-agent"
+ },
+ "job_id": "gpu-audit-ep01-scratch-vo-kokoro",
+ "segment": 1,
+ "session": {
+  "state": "running",
+  "id": "cl4-20261031-115332",
+  "started_at": "2026-10-31T11:53:32-02:30",
+  "last_poll_at": "2026-10-31T12:39:50-02:30"
+ },
+ "cu": {
+  "balance": 38.92,
+  "floor": 5.0,
+  "at": "2026-10-31T12:40:00-02:30"
+ },
+ "legacy": {
+  "job": "gpu-audit-ep01-scratch-vo-kokoro",
+  "segment": 1,
+  "state": "running",
+  "session": "cl4-20261031-115332",
+  "ts": "2026-10-31 12:20:00",
+  "epoch": 1793459400,
+  "files": 0,
+  "last_poll_rc": 0
+ },
+ "gpu_class": "L4",
+ "vram_gb": 24
+}

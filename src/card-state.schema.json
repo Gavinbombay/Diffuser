@@ -1,0 +1,484 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "lanes-router/specs/pushed-state.schema.json",
+ "title": "pushed card state, card-state/v1 (C1 writes, R2-R4/C3/C4 read)",
+ "type": "object",
+ "required": [
+  "schema_version",
+  "card",
+  "worker_id",
+  "ts",
+  "epoch",
+  "state",
+  "util",
+  "watts",
+  "vram_mb",
+  "vram_total_mb",
+  "ram_mb",
+  "backends",
+  "capacity",
+  "busy"
+ ],
+ "properties": {
+  "schema_version": {
+   "const": "card-state/v1"
+  },
+  "card": {
+   "enum": [
+    "colab-l4",
+    "echo-3060",
+    "warp-2070"
+   ]
+  },
+  "worker_id": {
+   "enum": [
+    "colab-l4",
+    "echo-3060",
+    "warp-2070"
+   ],
+   "description": "router worker id; equals card"
+  },
+  "ts": {
+   "type": "string",
+   "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+  },
+  "epoch": {
+   "type": "integer",
+   "minimum": 0
+  },
+  "state": {
+   "enum": [
+    "idle",
+    "busy",
+    "unknown"
+   ],
+   "description": "writer view; staleness is decided by the reader from epoch, never written"
+  },
+  "util": {
+   "oneOf": [
+    {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100
+    },
+    {
+     "const": "unknown"
+    }
+   ]
+  },
+  "watts": {
+   "oneOf": [
+    {
+     "type": "number",
+     "minimum": 0
+    },
+    {
+     "const": "unknown"
+    }
+   ]
+  },
+  "vram_mb": {
+   "oneOf": [
+    {
+     "type": "integer",
+     "minimum": 0
+    },
+    {
+     "const": "unknown"
+    }
+   ]
+  },
+  "vram_total_mb": {
+   "oneOf": [
+    {
+     "type": "integer",
+     "minimum": 0
+    },
+    {
+     "const": "unknown"
+    }
+   ]
+  },
+  "ram_mb": {
+   "oneOf": [
+    {
+     "type": "integer",
+     "minimum": 0
+    },
+    {
+     "const": "unknown"
+    }
+   ]
+  },
+  "backends": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   },
+   "uniqueItems": true
+  },
+  "capacity": {
+   "type": "object",
+   "required": [
+    "source",
+    "at",
+    "unknown"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "source": {
+     "enum": [
+      "nvidia-smi-local",
+      "nvidia-smi-ssh-echo-gpu",
+      "colab-l4-run-health",
+      "colab-l4-run-status",
+      "last-known"
+     ]
+    },
+    "at": {
+     "type": "string",
+     "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+    },
+    "unknown": {
+     "type": "array",
+     "items": {
+      "enum": [
+       "util",
+       "watts",
+       "vram_mb",
+       "vram_total_mb",
+       "ram_mb",
+       "backends",
+       "busy",
+       "session",
+       "cu",
+       "seat",
+       "state",
+       "job_id",
+       "segment"
+      ]
+     },
+     "uniqueItems": true
+    }
+   }
+  },
+  "busy": {
+   "type": "object",
+   "required": [
+    "by",
+    "ref"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "by": {
+     "enum": [
+      "none",
+      "router-job",
+      "external-unit",
+      "colab-job"
+     ]
+    },
+    "ref": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
+  },
+  "seat": {
+   "type": "object",
+   "required": [
+    "held",
+    "by"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "held": {
+     "type": "boolean"
+    },
+    "by": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
+  },
+  "job_id": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "segment": {
+   "oneOf": [
+    {
+     "type": "integer",
+     "minimum": 0
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
+  "session": {
+   "type": "object",
+   "required": [
+    "state",
+    "id",
+    "started_at",
+    "last_poll_at"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "state": {
+     "enum": [
+      "none",
+      "starting",
+      "running",
+      "lost",
+      "stopping"
+     ]
+    },
+    "id": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "started_at": {
+     "oneOf": [
+      {
+       "type": "string",
+       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "last_poll_at": {
+     "oneOf": [
+      {
+       "type": "string",
+       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   }
+  },
+  "cu": {
+   "type": "object",
+   "required": [
+    "balance",
+    "floor",
+    "at"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "balance": {
+     "oneOf": [
+      {
+       "type": "number",
+       "minimum": 0
+      },
+      {
+       "const": "unknown"
+      }
+     ]
+    },
+    "floor": {
+     "type": "number",
+     "minimum": 0
+    },
+    "at": {
+     "type": "string",
+     "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+    }
+   }
+  },
+  "legacy": {
+   "type": "object",
+   "description": "pre-v1 push_state keys (job, segment, state, session, ts, epoch, files, last_poll_rc) kept for gpu-watchdog; router ignores"
+  },
+  "proof_source": {
+   "enum": [
+    "router-probe",
+    "self-probe"
+   ],
+   "description": "how R2 proves this state: router-probe = router's own injected probe or Colab heartbeat (warp-2070, colab-l4); self-probe = the host pusher's own nvidia-smi reading (ssh-only cards, echo-3060)"
+  },
+  "self_probe": {
+   "type": "object",
+   "required": [
+    "worker_id",
+    "epoch",
+    "util",
+    "watts",
+    "source"
+   ],
+   "additionalProperties": false,
+   "description": "pusher's own nvidia-smi reading on the card host; signed = carries the card's worker_id; proved only if worker_id == registered worker_id and now - epoch <= 120",
+   "properties": {
+    "worker_id": {
+     "enum": [
+      "colab-l4",
+      "echo-3060",
+      "warp-2070"
+     ]
+    },
+    "epoch": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "util": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 100
+    },
+    "watts": {
+     "type": "number",
+     "minimum": 0
+    },
+    "source": {
+     "const": "nvidia-smi-host"
+    }
+   }
+  },
+  "gpu_class": {
+   "enum": [
+    "L4",
+    "A100",
+    "G4",
+    "H100"
+   ],
+   "description": "GPU class of the card (Kraydence 13:01 C4 ruling). Required for colab-l4; local consumer cards (echo-3060, warp-2070) omit it. Matches job-spec/v1 gpu_class case-insensitively (job 'any' matches every class)."
+  },
+  "vram_gb": {
+   "type": "number",
+   "minimum": 0,
+   "description": "total VRAM of the card in GB (static, not free). C4 admits a job only if vram_gb >= job gpu_min_vram_gb. Required for colab-l4, optional for other cards."
+  }
+ },
+ "additionalProperties": false,
+ "allOf": [
+  {
+   "if": {
+    "properties": {
+     "card": {
+      "const": "colab-l4"
+     }
+    }
+   },
+   "then": {
+    "required": [
+     "session",
+     "cu",
+     "seat",
+     "job_id",
+     "segment",
+     "gpu_class",
+     "vram_gb"
+    ],
+    "properties": {
+     "worker_id": {
+      "const": "colab-l4"
+     }
+    }
+   },
+   "else": {
+    "not": {
+     "anyOf": [
+      {
+       "required": [
+        "session"
+       ]
+      },
+      {
+       "required": [
+        "cu"
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "if": {
+    "properties": {
+     "card": {
+      "const": "echo-3060"
+     }
+    }
+   },
+   "then": {
+    "properties": {
+     "worker_id": {
+      "const": "echo-3060"
+     }
+    }
+   }
+  },
+  {
+   "if": {
+    "properties": {
+     "card": {
+      "const": "warp-2070"
+     }
+    }
+   },
+   "then": {
+    "properties": {
+     "worker_id": {
+      "const": "warp-2070"
+     }
+    }
+   }
+  },
+  {
+   "if": {
+    "properties": {
+     "busy": {
+      "properties": {
+       "by": {
+        "const": "none"
+       }
+      }
+     }
+    }
+   },
+   "then": {
+    "properties": {
+     "busy": {
+      "properties": {
+       "ref": {
+        "type": "null"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "if": {
+    "properties": {
+     "proof_source": {
+      "const": "self-probe"
+     }
+    },
+    "required": [
+     "proof_source"
+    ]
+   },
+   "then": {
+    "required": [
+     "self_probe"
+    ]
+   }
+  }
+ ]
+}

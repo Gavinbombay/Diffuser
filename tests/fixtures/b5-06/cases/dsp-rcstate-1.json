@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:443-452","kinds/S03-REF.md:115-117"],"expect":{"state":"failed"},"id":"dsp-rcstate-1","input":{"rc":1},"op":"rc_state","source":"kinds/s03/dispatch.py:443"}

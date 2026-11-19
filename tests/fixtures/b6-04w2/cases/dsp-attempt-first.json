@@ -1,0 +1,1 @@
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:684-700","kinds/S03-REF.md:205-209"],"expect":{"number":1},"id":"dsp-attempt-first","input":{"run_dir":{"files":{}}},"note":"an empty run directory","op":"next_attempt_number","source":"kinds/s03/dispatch.py:684"}
