@@ -56,7 +56,7 @@ impl CudaProcess {
     }
 
     /// Protected startup native CUDA launcher for any configured qualified GPU
-    /// (e.g. Warp RTX 2070, Echo RTX 3060, A15 RTX 4060). Enforces exact ELF
+    /// via its exact configured GPU UUID. Enforces exact ELF
     /// SHA-256 verification, finite nonzero address-space cap, `/proc/self/fd`
     /// execution with `env_clear()`, and optional read-only mount enforcement.
     pub(in crate::cosp) fn launch_native_configured(

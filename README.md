@@ -76,7 +76,7 @@ echo "$BEARER" | ./target/release/lanes-ctl diffuser operator 127.0.0.1:5820   "
 
 ## Native CUDA worker
 
-Compile the zero-toolkit CUDA Driver API helper on any Linux host with `g++` and `libcuda.so.1` (tested on RTX 2070 and RTX 3060; supports any exact `GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` UUID):
+Compile the zero-toolkit CUDA Driver API helper on any Linux host with `g++` and `libcuda.so.1` (supports any NVIDIA GPU via its exact `GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` UUID):
 
 ```sh
 g++ -O2 -std=c++20 -fPIE -pie -o diffuser-cuda-add-one native/cuda/add_one.cpp -ldl
@@ -92,7 +92,7 @@ Configure `backend.kind = "cuda"` with the exact `device_uuid`, `helper_path`, a
 | --- | --- |
 | Fail-closed ordinary startup (`503 routing_closed`) | Verified (`lanes-ctl` exit 74) |
 | Authenticated CPU lifecycle, idempotent retry, durable readback | Verified end-to-end |
-| Authenticated native CUDA execution (`add_one`, exact UUID pin) | Verified end-to-end on RTX 2070 & RTX 3060 |
+| Authenticated native CUDA execution (`add_one`, exact UUID pin) | Verified end-to-end on real NVIDIA CUDA GPUs |
 | `service-lane/v1` wire compatibility (15 frozen wire rows) | Preserved |
 | Uncertain teardown held state & `412 evidence_stale` refusal | Verified in fixture & route tests |
 

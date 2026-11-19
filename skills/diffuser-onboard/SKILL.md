@@ -1,6 +1,6 @@
 ---
 name: diffuser-onboard
-description: Guide an AI agent to onboard a new host, GPU (RTX 2070/3060/4060 or future cards), or pluggable tool/service (exec or http) into a live Diffuser v1.0 fleet controller in one flow.
+description: Guide an AI agent to onboard any new host, CPU/GPU accelerator, or pluggable tool/service (exec or http) into a live Diffuser fleet controller in one flow.
 ---
 
 # Diffuser Worker & Capability Onboarding Skill

@@ -19,9 +19,9 @@ Diffuser (`uai-diffuser` / `lanes-ctl`) is a strict, auditable resource router f
 
 ## Runtime Location
 
-- **Controller service**: `uai-diffuser.service` on NUC (`localhost:5820`, admin socket `/var/lib/uai-diffuser/control.sock`, state `/var/lib/uai-diffuser`, protected config `/etc/diffuser/controller.json`).
-- **Protected CPU worker**: `diffuser-cpu-worker.service` on NUC (`127.0.0.1:5821`, state `/var/lib/diffuser-cpu-worker`, config `/etc/diffuser/cpu-worker.json`).
-- **Native CUDA helpers**: Deterministic zero-toolkit `libcuda.so.1` helper (`native/cuda/add_one.cpp`, ELF SHA-256 `ceddb204cee8b6caf7ae5de2d9897f55dec1c9a857cb809cd51e5bc8904202d3`) deployed on Warp (RTX 2070) and Echo (RTX 3060), connected over SSH loopback tunnels (`ssh -L`), with support for A15 laptop RTX 4060.
+- **Controller service**: `uai-diffuser.service` on your controller host (`localhost:5820`, admin socket `/var/lib/uai-diffuser/control.sock`, state `/var/lib/uai-diffuser`, protected config `/etc/diffuser/controller.json`, fleet config `/etc/diffuser/fleet.json`).
+- **CPU & GPU fleet workers**: Any number of local or remote `uai-diffuser --fleet-worker <config.json>` daemons (loopback or SSH-tunneled), plus optional protected single-worker daemons (`--worker-config`).
+- **Native CUDA helpers**: Deterministic zero-toolkit `libcuda.so.1` helper (`native/cuda/add_one.cpp`) compiled on any Linux NVIDIA host and connected locally or over encrypted SSH loopback tunnels (`ssh -L` / `-R`).
 - **Binaries & Source**: `/usr/local/bin/uai-diffuser`, `/usr/local/bin/lanes-ctl`, active repo `/srv/diffuser`, public repo `Gavinbombay/Diffuser`.
 
 ## Health and Logs
