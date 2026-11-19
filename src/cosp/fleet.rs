@@ -401,6 +401,9 @@ async fn handle_enroll(
            gpus_json=excluded.gpus_json,
            capabilities_json=excluded.capabilities_json,
            status='active',
+           cpu_reserved=CASE WHEN EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running') THEN fleet_workers.cpu_reserved ELSE 0 END,
+           ram_reserved=CASE WHEN EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running') THEN fleet_workers.ram_reserved ELSE 0 END,
+           vram_reserved=CASE WHEN EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running') THEN fleet_workers.vram_reserved ELSE 0 END,
            last_heartbeat_ms=excluded.last_heartbeat_ms",
         params![
             req.worker_id,
