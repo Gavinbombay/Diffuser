@@ -514,8 +514,12 @@ fn api(s: Spine) -> Router {
     api_with_namespace(s, lane_assignment::router())
 }
 fn api_with_namespace(s: Spine, namespace: Router<Spine>) -> Router {
+    api_with_namespaces(s, namespace, fleet::closed_router())
+}
+fn api_with_namespaces(s: Spine, namespace: Router<Spine>, fleet_ns: Router<Spine>) -> Router {
     Router::new()
         .nest("/v1/diffuser", namespace)
+        .nest("/v1/fleet", fleet_ns)
         .route("/health", get(handle))
         .route("/v1/health", get(handle))
         .route("/v1/embed", post(handle))
@@ -529,6 +533,7 @@ fn api_with_namespace(s: Spine, namespace: Router<Spine>) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .with_state(s)
 }
+mod fleet;
 mod la_protected;
 mod la_startup_check;
 
@@ -539,11 +544,15 @@ pub fn main_cli() -> i32 {
     }
     let root =
         PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/uai-diffuser".into()));
+    if let Some(fleet_worker_cfg) = common::opt(&a, "--fleet-worker") {
+        return fleet::run_fleet_worker(Path::new(&fleet_worker_cfg));
+    }
     if let Some(worker_cfg) = common::opt(&a, "--worker-config") {
         let bind = common::opt(&a, "--bind").unwrap_or("127.0.0.1:5821".into());
         return la_protected::run_worker(Path::new(&worker_cfg), &bind, &root);
     }
     let protected_cfg = common::opt(&a, "--protected-config");
+    let fleet_cfg = common::opt(&a, "--fleet-config");
     let edge = common::opt(&a, "--profile").as_deref() == Some("embed-edge");
     let bind = common::opt(&a, "--bind").unwrap_or("localhost:5820".into());
     if !bind.starts_with("localhost:") {
@@ -612,7 +621,17 @@ pub fn main_cli() -> i32 {
             },
             None => lane_assignment::router(),
         };
-        let r = api_with_namespace(s, namespace).fallback_service(legacy);
+        let fleet_ns = match fleet_cfg {
+            Some(ref cfg_path) => match fleet::router(Path::new(cfg_path), &root) {
+                Ok(ns) => ns,
+                Err(err) => {
+                    eprintln!("fleet_controller_error: {err}");
+                    return 70;
+                }
+            },
+            None => fleet::closed_router(),
+        };
+        let r = api_with_namespaces(s, namespace, fleet_ns).fallback_service(legacy);
         let port = match bind
             .strip_prefix("localhost:")
             .and_then(|v| v.parse::<u16>().ok())

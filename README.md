@@ -96,6 +96,15 @@ Configure `backend.kind = "cuda"` with the exact `device_uuid`, `helper_path`, a
 | `service-lane/v1` wire compatibility (15 frozen wire rows) | Preserved |
 | Uncertain teardown held state & `412 evidence_stale` refusal | Verified in fixture & route tests |
 
+
+## Scalable Fleet, Pluggable Workloads & Agent Onboarding (`v1.0`)
+
+Diffuser includes a dynamic multi-worker fleet router (`/v1/fleet/*`), pluggable `exec`/`http` workload daemon (`--fleet-worker`), MCP JSON-RPC tool surface (`/v1/fleet/mcp`), `lanes-ctl fleet` CLI, and bundled agent onboarding skills (`skills/diffuser-onboard/SKILL.md`, `skills/diffuser-caller/SKILL.md`).
+
+- **Add any machine or GPU** without Rust changes: author a `0600` `fleet-worker.json` with `exec` (Blender, Whisper, native CUDA helper, custom scripts) or `http` (Ollama, ComfyUI, local services) profiles and start `uai-diffuser --fleet-worker fleet-worker.json`.
+- **Issue scoped tokens** for people or agents: `lanes-ctl fleet token-issue --actor <name> --project <proj> --capabilities <csv>`.
+- **Discover & route dynamically**: `lanes-ctl fleet discover`, `lanes-ctl fleet submit --capability <cap> [--gpu <uuid>] --key <idemp>`, or call MCP tools (`fleet_discover`, `fleet_list_workers`, `fleet_submit_job`, `fleet_get_job`, `fleet_issue_token`) at `POST /v1/fleet/mcp`.
+
 ## Plain-English guide
 
 See [`HOW-IT-WORKS.md`](HOW-IT-WORKS.md) for a non-technical walkthrough of how Diffuser routes, verifies, and protects CPU and GPU work.

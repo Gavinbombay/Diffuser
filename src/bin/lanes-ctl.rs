@@ -232,11 +232,128 @@ fn run(a: &[String]) -> Result<Value> {
         _ => common::fail(64, "command_required"),
     }
 }
+
+fn fleet_token() -> Result<String> {
+    if let Ok(t) = std::env::var("DIFFUSER_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Ok(t);
+        }
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+        .map_err(|_| Failure(64, "token_required"))?;
+    let t = buf.trim().to_string();
+    if t.is_empty() {
+        return common::fail(64, "token_required");
+    }
+    Ok(t)
+}
+
+fn fleet_cli(a: &[String]) -> Result<Value> {
+    let base = common::opt(a, "--url").unwrap_or_else(|| "http://127.0.0.1:5820".into());
+    let base = base.trim_end_matches('/');
+    let token = fleet_token()?;
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|_| Failure(75, "diffuser_unavailable"))?;
+
+    let sub = a.first().map(String::as_str).unwrap_or("");
+    let resp = match sub {
+        "discover" => client
+            .get(format!("{base}/v1/fleet/discover"))
+            .header("authorization", format!("Bearer {token}"))
+            .send(),
+        "workers" => client
+            .get(format!("{base}/v1/fleet/workers"))
+            .header("authorization", format!("Bearer {token}"))
+            .send(),
+        "job" => {
+            let jid = a.get(1).ok_or(Failure(64, "job_id_required"))?;
+            client
+                .get(format!("{base}/v1/fleet/jobs/{jid}"))
+                .header("authorization", format!("Bearer {token}"))
+                .send()
+        }
+        "drain" => {
+            let wid = a.get(1).ok_or(Failure(64, "worker_id_required"))?;
+            client
+                .post(format!("{base}/v1/fleet/workers/{wid}/drain"))
+                .header("authorization", format!("Bearer {token}"))
+                .send()
+        }
+        "token-issue" => {
+            let actor = common::opt(a, "--actor").ok_or(Failure(64, "actor_required"))?;
+            let project = common::opt(a, "--project").ok_or(Failure(64, "project_required"))?;
+            let caps_csv = common::opt(a, "--capabilities").unwrap_or_else(|| "*".into());
+            let caps: Vec<String> = caps_csv
+                .split(',')
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+            let ttl_secs: u64 = common::opt(a, "--ttl-secs")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(86_400 * 30);
+            client
+                .post(format!("{base}/v1/fleet/tokens"))
+                .header("authorization", format!("Bearer {token}"))
+                .json(&json!({
+                    "actor": actor,
+                    "project": project,
+                    "allowed_capabilities": caps,
+                    "ttl_secs": ttl_secs
+                }))
+                .send()
+        }
+        "submit" => {
+            let capability =
+                common::opt(a, "--capability").ok_or(Failure(64, "capability_required"))?;
+            let key = common::opt(a, "--key")
+                .unwrap_or_else(|| format!("cli_{}", common::hash(format!("{capability}\n{:?}", a))));
+            let input_raw = common::opt(a, "--input").unwrap_or_else(|| "{}".into());
+            let input: Value =
+                serde_json::from_str(&input_raw).map_err(|_| Failure(64, "invalid_input_json"))?;
+            let pin_gpu_uuid = common::opt(a, "--gpu");
+            let mut body = json!({
+                "capability": capability,
+                "input": input
+            });
+            if let Some(gpu) = pin_gpu_uuid {
+                body["pin_gpu_uuid"] = json!(gpu);
+            }
+            client
+                .post(format!("{base}/v1/fleet/jobs"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("idempotency-key", key)
+                .json(&body)
+                .send()
+        }
+        _ => return common::fail(64, "fleet_subcommand_required"),
+    }
+    .map_err(|_| Failure(75, "diffuser_unavailable"))?;
+
+    let ok = resp.status().is_success();
+    let val: Value = resp.json().map_err(|_| Failure(75, "diffuser_invalid_reply"))?;
+    if !ok {
+        println!("{val}");
+        return common::fail(74, "diffuser_refused");
+    }
+    Ok(val)
+}
+
 fn main() {
+    let args = common::args();
+    if let [family, rest @ ..] = args.as_slice() {
+        if family == "fleet" {
+            std::process::exit(common::emit(fleet_cli(rest)));
+        }
+    }
     if let Err(error) = common::ack() {
         std::process::exit(common::emit(Err(error)));
     }
-    let args = common::args();
     let status = match args.as_slice() {
         [family, command, rest @ ..] if family == "diffuser" && command == "operator" => {
             operator::emit(operator::run(rest))
