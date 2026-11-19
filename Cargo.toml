@@ -3,7 +3,9 @@ name = "lane-router"
 version = "0.3.0"
 edition = "2021"
 autotests = false
-description = "Shared service lane router (service-lane/v1). Rust/Axum per rust-http-lane."
+license = "Apache-2.0"
+repository = "https://github.com/Gavinbombay/Diffuser"
+description = "Diffuser: scalable multi-worker CPU/CUDA resource router, typed SDK, CLI, and MCP fleet server."
 
 [dependencies]
 libc = "0.2"

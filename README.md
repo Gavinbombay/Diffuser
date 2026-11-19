@@ -103,6 +103,8 @@ Diffuser includes a dynamic multi-worker fleet router (`/v1/fleet/*`), pluggable
 
 - **Add any machine or GPU** without Rust changes: author a `0600` `fleet-worker.json` with `exec` (Blender, Whisper, native CUDA helper, custom scripts) or `http` (Ollama, ComfyUI, local services) profiles and start `uai-diffuser --fleet-worker fleet-worker.json`.
 - **Issue scoped tokens** for people or agents: `lanes-ctl fleet token-issue --actor <name> --project <proj> --capabilities <csv>`.
+- **Large binary artifacts (up to 64 MiB)**: Upload and retrieve SHA-256-verified binary payloads via `POST /v1/fleet/artifacts` and `GET /v1/fleet/artifacts/{artifact_id}/content`.
+- **Authenticated HTTP backends**: `http` adapter profiles support optional `bearer_file` (`0600`) for upstream services like Ollama, OpenAI-compatible embedding servers, or ComfyUI.
 - **Discover & route dynamically**: `lanes-ctl fleet discover`, `lanes-ctl fleet submit --capability <cap> [--gpu <uuid>] --key <idemp>`, or call MCP tools (`fleet_discover`, `fleet_list_workers`, `fleet_submit_job`, `fleet_get_job`, `fleet_issue_token`) at `POST /v1/fleet/mcp`.
 
 ## Plain-English guide

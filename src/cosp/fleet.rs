@@ -28,6 +28,7 @@ use subtle::ConstantTimeEq;
 
 const HEARTBEAT_TTL_MS: u64 = 45_000;
 const MAX_RPC_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct GpuInfo {
@@ -71,6 +72,8 @@ pub(super) enum ProfileAdapter {
         timeout_secs: u64,
         #[serde(default)]
         gpu_uuid: Option<String>,
+        #[serde(default)]
+        bearer_file: Option<String>,
     },
 }
 
@@ -167,6 +170,7 @@ struct FleetState {
     db: Arc<Mutex<Connection>>,
     admin_sha256: String,
     http: reqwest::blocking::Client,
+    artifacts_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -241,6 +245,15 @@ impl FleetState {
                  created_at_ms INTEGER NOT NULL,
                  updated_at_ms INTEGER NOT NULL,
                  UNIQUE(actor, project, idempotency_key)
+             );
+             CREATE TABLE IF NOT EXISTS fleet_artifacts (
+                 artifact_id TEXT PRIMARY KEY,
+                 actor TEXT NOT NULL,
+                 project TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 media_type TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL
              );",
         )
         .map_err(|e| format!("fleet_schema:{e}"))?;
@@ -252,10 +265,13 @@ impl FleetState {
             .build()
             .map_err(|e| format!("fleet_http:{e}"))?;
 
+        let artifacts_dir = state_dir.join("fleet-artifacts");
+        fs::create_dir_all(&artifacts_dir).map_err(|e| format!("fleet_artifacts_mkdir:{e}"))?;
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
             admin_sha256: admin_sha,
             http,
+            artifacts_dir,
         })
     }
 
@@ -338,6 +354,9 @@ pub(super) fn closed_router() -> Router<super::Spine> {
         .route("/tokens/{token_id}/revoke", post(closed))
         .route("/jobs", post(closed))
         .route("/jobs/{job_id}", get(closed))
+        .route("/artifacts", post(closed))
+        .route("/artifacts/{artifact_id}", get(closed))
+        .route("/artifacts/{artifact_id}/content", get(closed))
         .route("/mcp", post(closed))
 }
 
@@ -353,6 +372,9 @@ pub(super) fn router(cfg_path: &Path, state_dir: &Path) -> Result<Router<super::
         .route("/tokens/{token_id}/revoke", post(handle_revoke_token))
         .route("/jobs", post(handle_submit_job))
         .route("/jobs/{job_id}", get(handle_get_job))
+        .route("/artifacts", post(handle_upload_artifact).layer(axum::extract::DefaultBodyLimit::max(MAX_ARTIFACT_BYTES)))
+        .route("/artifacts/{artifact_id}", get(handle_get_artifact_manifest))
+        .route("/artifacts/{artifact_id}/content", get(handle_get_artifact_content))
         .route("/mcp", post(handle_mcp))
         .with_state(state))
 }
@@ -1040,6 +1062,152 @@ async fn handle_get_job(
     }
 }
 
+
+async fn handle_upload_artifact(
+    State(state): State<FleetState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let auth = match state.authenticate(&headers) {
+        Ok(a) => a,
+        Err((st, code)) => return err_resp(st, code, "authentication failed"),
+    };
+    if body.is_empty() || body.len() > MAX_ARTIFACT_BYTES {
+        return err_resp(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_size_invalid",
+            "artifact must be 1 byte to 64 MiB",
+        );
+    }
+    let media_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let digest = sha256_hex(&body);
+    let mut rnd = [0u8; 12];
+    let _ = fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut rnd));
+    let artifact_id = format!("fart_{}", hex::encode(rnd));
+    let file_path = state.artifacts_dir.join(&artifact_id);
+    if fs::write(&file_path, &body).is_err() {
+        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "artifact write failed");
+    }
+    let ts = now_ms() as i64;
+    let Ok(conn) = state.db.lock() else {
+        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+    };
+    if conn
+        .execute(
+            "INSERT INTO fleet_artifacts (artifact_id, actor, project, sha256, bytes, media_type, created_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![artifact_id, auth.actor, auth.project, digest, body.len() as i64, media_type, ts],
+        )
+        .is_err()
+    {
+        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "artifact metadata write failed");
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "schema_version": "diffuser-fleet/v1",
+            "artifact_id": artifact_id,
+            "sha256": digest,
+            "bytes": body.len(),
+            "media_type": media_type,
+            "created_at_ms": ts
+        })),
+    )
+        .into_response()
+}
+
+async fn handle_get_artifact_manifest(
+    State(state): State<FleetState>,
+    headers: HeaderMap,
+    AxPath(artifact_id): AxPath<String>,
+) -> Response {
+    let auth = match state.authenticate(&headers) {
+        Ok(a) => a,
+        Err((st, code)) => return err_resp(st, code, "authentication failed"),
+    };
+    let Ok(conn) = state.db.lock() else {
+        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+    };
+    let row: Option<(String, String, String, i64, String, i64)> = conn
+        .query_row(
+            "SELECT actor, project, sha256, bytes, media_type, created_at_ms FROM fleet_artifacts WHERE artifact_id=?1",
+            [&artifact_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .optional()
+        .unwrap_or(None);
+    let Some((actor, project, digest, bytes, media_type, ts)) = row else {
+        return err_resp(StatusCode::NOT_FOUND, "artifact_not_found", "unknown artifact_id");
+    };
+    if !auth.is_admin && (actor != auth.actor || project != auth.project) {
+        return err_resp(StatusCode::FORBIDDEN, "forbidden", "artifact belongs to another caller");
+    }
+    Json(json!({
+        "schema_version": "diffuser-fleet/v1",
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "bytes": bytes,
+        "media_type": media_type,
+        "created_at_ms": ts
+    }))
+    .into_response()
+}
+
+async fn handle_get_artifact_content(
+    State(state): State<FleetState>,
+    headers: HeaderMap,
+    AxPath(artifact_id): AxPath<String>,
+) -> Response {
+    let auth = match state.authenticate(&headers) {
+        Ok(a) => a,
+        Err((st, code)) => return err_resp(st, code, "authentication failed"),
+    };
+    if !artifact_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return err_resp(StatusCode::BAD_REQUEST, "invalid_artifact_id", "invalid characters");
+    }
+    let meta: Option<(String, String, String, String)> = {
+        let Ok(conn) = state.db.lock() else {
+            return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+        };
+        conn.query_row(
+            "SELECT actor, project, sha256, media_type FROM fleet_artifacts WHERE artifact_id=?1",
+            [&artifact_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .unwrap_or(None)
+    };
+    let Some((actor, project, expected_sha, media_type)) = meta else {
+        return err_resp(StatusCode::NOT_FOUND, "artifact_not_found", "unknown artifact_id");
+    };
+    if !auth.is_admin && (actor != auth.actor || project != auth.project) {
+        return err_resp(StatusCode::FORBIDDEN, "forbidden", "artifact belongs to another caller");
+    }
+    let Ok(bytes) = fs::read(state.artifacts_dir.join(&artifact_id)) else {
+        return err_resp(StatusCode::NOT_FOUND, "artifact_missing", "artifact bytes missing");
+    };
+    if sha256_hex(&bytes) != expected_sha {
+        return err_resp(StatusCode::INTERNAL_SERVER_ERROR, "artifact_integrity_failed", "digest mismatch");
+    }
+    (
+        StatusCode::OK,
+        [
+            ("content-type", media_type),
+            ("x-diffuser-sha256", expected_sha),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 // === MCP JSON-RPC 2.0 Surface (/v1/fleet/mcp) ===
 
 async fn handle_mcp(
@@ -1309,14 +1477,23 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
             method,
             timeout_secs,
             gpu_uuid,
+            bearer_file,
         } => {
             let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
-            let resp = rt
+            let mut builder = rt
                 .http
                 .request(m, url)
                 .timeout(Duration::from_secs(req.timeout_secs.min(*timeout_secs).clamp(1, 300)))
-                .json(&req.input)
-                .send();
+                .json(&req.input);
+            if let Some(bf) = bearer_file {
+                if let Ok(tok) = fs::read_to_string(bf) {
+                    let t = tok.trim();
+                    if !t.is_empty() {
+                        builder = builder.header("authorization", format!("Bearer {t}"));
+                    }
+                }
+            }
+            let resp = builder.send();
             match resp {
                 Ok(r) if r.status().is_success() => {
                     let text = r.text().unwrap_or_default();
