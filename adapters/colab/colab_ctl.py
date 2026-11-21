@@ -115,7 +115,7 @@ def lane_command(args):
     for flag, value in (
         ("--min-cu-floor", args.min_cu_floor), ("--max-cu", args.max_cu),
         ("--max-walltime", args.max_walltime), ("--max-seats", args.max_seats),
-        ("--max-account-vms", args.max_account_vms),
+        ("--max-account-vms", args.max_account_vms), ("--idle-timeout", args.idle_timeout),
     ):
         if value is not None:
             command.extend((flag, str(value)))

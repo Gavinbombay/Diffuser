@@ -46,12 +46,30 @@ const MIN_JOB_RAM_BYTES: u64 = 64 * 1024 * 1024;
 /// Running jobs allowed for one actor and project. Enforced inside the reservation transaction.
 const MAX_INFLIGHT_PER_ACTOR_PROJECT: i64 = 16;
 const FINISH_ATTEMPTS: u32 = 3;
+/// Unpinned jobs skip a worker at or above this live utilization.
+/// That covers an external process holding the GPU, including when diffuser itself has reserved no VRAM.
+const EXTERNAL_GPU_BUSY_PCT: i64 = 85;
+const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct GpuInfo {
     pub(super) uuid: String,
     pub(super) name: String,
     pub(super) vram_bytes: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LiveGpuSample {
+    uuid: String,
+    memory_free_bytes: u64,
+    memory_total_bytes: u64,
+    util_pct: u64,
+}
+
+struct LiveGpuTelemetry {
+    free_bytes: u64,
+    util_pct: u64,
+    gpus: Vec<LiveGpuSample>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -164,6 +182,61 @@ fn default_true() -> bool {
     true
 }
 
+fn effective_vram_bytes(accounting_free: i64, live_free: Option<i64>) -> u64 {
+    let accounting = accounting_free.max(0) as u64;
+    match live_free {
+        Some(live) if live >= 0 => accounting.min(live as u64),
+        _ => accounting,
+    }
+}
+
+/// Reported free bytes cannot exceed `vram_total - vram_used` on that card.
+fn clamped_live_free_bytes(memory_free_bytes: u64, memory_total_bytes: u64) -> u64 {
+    let visible_free = memory_free_bytes.min(memory_total_bytes);
+    let used = memory_total_bytes.saturating_sub(visible_free);
+    memory_free_bytes.min(memory_total_bytes.saturating_sub(used))
+}
+
+enum PinnedLiveFree {
+    /// This worker did not report a per-GPU sample list.
+    NoReport,
+    /// Per-GPU samples exist, and the pinned UUID is not among them.
+    Missing,
+    /// Clamped live free bytes for the pinned UUID.
+    Free(u64),
+}
+
+fn pinned_gpu_live_free(raw: Option<&str>, enrolled: &[GpuInfo], pin: &str) -> PinnedLiveFree {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return PinnedLiveFree::NoReport;
+    };
+    let Ok(samples) = serde_json::from_str::<Vec<LiveGpuSample>>(raw) else {
+        return PinnedLiveFree::NoReport;
+    };
+    if samples.is_empty() {
+        return PinnedLiveFree::NoReport;
+    }
+    let Some(sample) = samples.iter().find(|gpu| gpu.uuid == pin) else {
+        return PinnedLiveFree::Missing;
+    };
+    let total = enrolled
+        .iter()
+        .find(|gpu| gpu.uuid == pin)
+        .map(|gpu| gpu.vram_bytes)
+        .filter(|bytes| *bytes > 0)
+        .map(|bytes| sample.memory_total_bytes.min(bytes))
+        .unwrap_or(sample.memory_total_bytes);
+    PinnedLiveFree::Free(clamped_live_free_bytes(sample.memory_free_bytes, total))
+}
+
+fn live_free_i64(bytes: u64) -> i64 {
+    i64::try_from(bytes).unwrap_or(i64::MAX)
+}
+
+fn external_gpu_busy(util: Option<i64>) -> bool {
+    util.is_some_and(|pct| (0..=100).contains(&pct) && pct >= EXTERNAL_GPU_BUSY_PCT)
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -218,6 +291,34 @@ fn add_rpc_session_column(conn: &mut Connection) -> rusqlite::Result<()> {
     )?;
     if !exists {
         tx.execute("ALTER TABLE fleet_workers ADD COLUMN rpc_session TEXT", [])?;
+    }
+    tx.commit()
+}
+
+fn add_live_gpu_columns(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (name, ddl) in [
+        (
+            "live_vram_free_bytes",
+            "ALTER TABLE fleet_workers ADD COLUMN live_vram_free_bytes INTEGER",
+        ),
+        (
+            "gpu_util_pct",
+            "ALTER TABLE fleet_workers ADD COLUMN gpu_util_pct INTEGER",
+        ),
+        (
+            "gpus_live_json",
+            "ALTER TABLE fleet_workers ADD COLUMN gpus_live_json TEXT",
+        ),
+    ] {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fleet_workers') WHERE name=?1)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.execute(ddl, [])?;
+        }
     }
     tx.commit()
 }
@@ -309,7 +410,10 @@ impl FleetState {
                  gpus_json TEXT NOT NULL,
                  capabilities_json TEXT NOT NULL,
                  status TEXT NOT NULL,
-                 last_heartbeat_ms INTEGER NOT NULL
+                 last_heartbeat_ms INTEGER NOT NULL,
+                 live_vram_free_bytes INTEGER,
+                 gpu_util_pct INTEGER,
+                 gpus_live_json TEXT
              );
              CREATE TABLE IF NOT EXISTS fleet_tokens (
                  token_id TEXT PRIMARY KEY,
@@ -353,6 +457,7 @@ impl FleetState {
         .map_err(|e| format!("fleet_schema:{e}"))?;
         add_rpc_session_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
         add_capacity_released_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
+        add_live_gpu_columns(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
 
         let http = private_http_client()
             .timeout(rpc_http_timeout(MAX_JOB_TIMEOUT_SECS))
@@ -559,34 +664,81 @@ struct HeartbeatRequest {
     gpus: Option<Vec<GpuInfo>>,
     #[serde(default)]
     capabilities: Option<Vec<CapabilityInfo>>,
+    /// Absent on older workers. Present null clears the last sample.
+    #[serde(default)]
+    live_vram_free_bytes: Option<i64>,
+    #[serde(default)]
+    gpu_util_pct: Option<i64>,
 }
 
 async fn handle_heartbeat(
     State(state): State<FleetState>,
     headers: HeaderMap,
     AxPath(worker_id): AxPath<String>,
-    Json(req): Json<HeartbeatRequest>,
+    Json(body): Json<Value>,
 ) -> Response {
     if !state.check_admin(&headers) {
         return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
     }
+    let req: HeartbeatRequest = match serde_json::from_value(body.clone()) {
+        Ok(req) => req,
+        Err(_) => {
+            return err_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+                "invalid heartbeat",
+            )
+        }
+    };
     let ts = now_ms() as i64;
+    let update_inventory = req.gpus.is_some() && req.capabilities.is_some();
+    let gpus_json = req
+        .gpus
+        .as_ref()
+        .map(|gpus| serde_json::to_string(gpus).unwrap_or_else(|_| "[]".into()));
+    let caps_json = req
+        .capabilities
+        .as_ref()
+        .map(|caps| serde_json::to_string(caps).unwrap_or_else(|_| "[]".into()));
+    // Key presence matters. Older workers omit these fields and must not wipe a newer sample,
+    // while an explicit null means this probe failed and accounting VRAM should be used again.
+    let set_live = body.get("live_vram_free_bytes").is_some();
+    let live_val = req.live_vram_free_bytes.filter(|v| *v >= 0);
+    let set_util = body.get("gpu_util_pct").is_some();
+    let util_val = req.gpu_util_pct.filter(|v| (0..=100).contains(v));
+    // Per-GPU detail is always tied to the latest heartbeat; omitting gpus_live clears any
+    // prior per-GPU sample so an exact GPU pin cannot reuse stale VRAM data.
+    let detail_json = match body.get("gpus_live") {
+        Some(value) if !value.is_null() => serde_json::from_value::<Vec<LiveGpuSample>>(value.clone())
+            .ok()
+            .and_then(|gpus| serde_json::to_string(&gpus).ok()),
+        _ => None,
+    };
     let Ok(conn) = state.db.lock() else {
         return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
     };
-    let updated = if let (Some(gpus), Some(caps)) = (&req.gpus, &req.capabilities) {
-        let gj = serde_json::to_string(gpus).unwrap_or_else(|_| "[]".into());
-        let cj = serde_json::to_string(caps).unwrap_or_else(|_| "[]".into());
-        conn.execute(
-            "UPDATE fleet_workers SET last_heartbeat_ms=?1, gpus_json=?2, capabilities_json=?3 WHERE worker_id=?4",
-            params![ts, gj, cj, worker_id],
-        )
-    } else {
-        conn.execute(
-            "UPDATE fleet_workers SET last_heartbeat_ms=?1 WHERE worker_id=?2",
-            params![ts, worker_id],
-        )
-    };
+    let updated = conn.execute(
+        "UPDATE fleet_workers SET
+            last_heartbeat_ms=?1,
+            gpus_json=CASE WHEN ?2=1 THEN ?3 ELSE gpus_json END,
+            capabilities_json=CASE WHEN ?2=1 THEN ?4 ELSE capabilities_json END,
+            live_vram_free_bytes=CASE WHEN ?5=1 THEN ?6 ELSE live_vram_free_bytes END,
+            gpu_util_pct=CASE WHEN ?7=1 THEN ?8 ELSE gpu_util_pct END,
+            gpus_live_json=?9
+         WHERE worker_id=?10",
+        params![
+            ts,
+            if update_inventory { 1 } else { 0 },
+            gpus_json,
+            caps_json,
+            if set_live { 1 } else { 0 },
+            live_val,
+            if set_util { 1 } else { 0 },
+            util_val,
+            detail_json,
+            worker_id,
+        ],
+    );
     match updated {
         Ok(0) => err_resp(StatusCode::NOT_FOUND, "worker_not_found", "unknown worker_id"),
         Ok(_) => Json(json!({"ok": true, "worker_id": worker_id, "heartbeat_ms": ts})).into_response(),
@@ -621,7 +773,7 @@ fn list_workers_json(state: &FleetState) -> Result<Vec<Value>, &'static str> {
         .prepare(
             "SELECT worker_id, host, rpc_url, cpu_total, ram_total, vram_total,
                     cpu_reserved, ram_reserved, vram_reserved, gpus_json, capabilities_json,
-                    status, last_heartbeat_ms
+                    status, last_heartbeat_ms, live_vram_free_bytes, gpu_util_pct, gpus_live_json
              FROM fleet_workers ORDER BY worker_id",
         )
         .map_err(|_| "storage_unavailable")?;
@@ -641,9 +793,17 @@ fn list_workers_json(state: &FleetState) -> Result<Vec<Value>, &'static str> {
             let caps_s: String = r.get(10)?;
             let status: String = r.get(11)?;
             let hb: i64 = r.get(12)?;
+            let live_free: Option<i64> = r.get(13)?;
+            let gpu_util: Option<i64> = r.get(14)?;
+            let gpus_live_s: Option<String> = r.get(15)?;
             let alive = now.saturating_sub(hb as u64) <= HEARTBEAT_TTL_MS;
             let gpus: Value = serde_json::from_str(&gpus_s).unwrap_or(json!([]));
             let caps: Value = serde_json::from_str(&caps_s).unwrap_or(json!([]));
+            let gpus_live: Value = gpus_live_s
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or(Value::Null);
+            let accounting_vram = (vram_t - vram_r).max(0);
             Ok(json!({
                 "worker_id": wid,
                 "host": host,
@@ -656,7 +816,10 @@ fn list_workers_json(state: &FleetState) -> Result<Vec<Value>, &'static str> {
                 "ram_total": ram_t,
                 "ram_free": (ram_t - ram_r).max(0),
                 "vram_total": vram_t,
-                "vram_free": (vram_t - vram_r).max(0),
+                "vram_free": accounting_vram,
+                "live_vram_free": live_free,
+                "gpu_util_pct": gpu_util,
+                "gpus_live": gpus_live,
                 "gpus": gpus,
                 "capabilities": caps,
                 "last_heartbeat_ms": hb
@@ -695,6 +858,8 @@ fn discover_json(state: &FleetState, auth: &CallerAuth) -> Result<Value, &'stati
                 if !FleetState::capability_allowed(auth, cap_name) {
                     continue;
                 }
+                let accounting = w["vram_free"].as_i64().unwrap_or(0);
+                let live = w["live_vram_free"].as_i64();
                 caps_out.push(json!({
                     "capability": cap_name,
                     "kind": c["kind"],
@@ -704,7 +869,9 @@ fn discover_json(state: &FleetState, auth: &CallerAuth) -> Result<Value, &'stati
                     "accepting": true,
                     "free_cpu_millicores": w["cpu_free"],
                     "free_ram_bytes": w["ram_free"],
-                    "free_vram_bytes": w["vram_free"],
+                    "free_vram_bytes": effective_vram_bytes(accounting, live),
+                    "live_vram_free": w["live_vram_free"],
+                    "gpu_util_pct": w["gpu_util_pct"],
                     "gpus": w["gpus"]
                 }));
             }
@@ -1060,17 +1227,43 @@ fn prepare_job(
     let mut stmt = tx
         .prepare(
             "SELECT worker_id, rpc_url, rpc_secret_hex, cpu_total - cpu_reserved, ram_total - ram_reserved,
-                    vram_total - vram_reserved, gpus_json, capabilities_json, last_heartbeat_ms, rpc_session
+                    vram_total - vram_reserved, gpus_json, capabilities_json, last_heartbeat_ms, rpc_session,
+                    live_vram_free_bytes, gpu_util_pct, gpus_live_json
              FROM fleet_workers WHERE status='active' AND rpc_session IS NOT NULL
              ORDER BY (vram_total - vram_reserved) DESC, worker_id ASC",
         )
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched query".into()))?;
 
-    let candidates: Vec<(String, String, String, i64, i64, i64, String, String, i64, String)> = stmt
+    let candidates: Vec<(
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        i64,
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    )> = stmt
         .query_map([], |r| {
             Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
             ))
         })
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched map".into()))?
@@ -1079,18 +1272,29 @@ fn prepare_job(
     drop(stmt);
 
     let mut chosen = None;
-    for (wid, url, secret, f_cpu, f_ram, f_vram, gpus_s, caps_s, hb, session) in candidates {
+    // True when a live capability match was rejected only by external utilization or live free VRAM.
+    let mut blocked_by_live = false;
+    for (
+        wid,
+        url,
+        secret,
+        f_cpu,
+        f_ram,
+        f_vram,
+        gpus_s,
+        caps_s,
+        hb,
+        session,
+        live_free,
+        gpu_util,
+        gpus_live,
+    ) in candidates
+    {
         // Existing enrollments are also checked before any reservation or RPC.
         let Some(url) = fleet_base_url(&url) else {
             continue;
         };
         if !is_random_id(&session) || now.saturating_sub(hb as u64) > HEARTBEAT_TTL_MS {
-            continue;
-        }
-        if (f_cpu as u64) < cpu_millicores
-            || (f_ram as u64) < ram_bytes
-            || (f_vram as u64) < req.min_vram_bytes
-        {
             continue;
         }
         let caps: Vec<CapabilityInfo> = serde_json::from_str(&caps_s).unwrap_or_default();
@@ -1106,25 +1310,61 @@ fn prepare_job(
                 true
             }
         });
-        if let Some(cap_entry) = matching_cap {
-            let gpu_sel = req
-                .pin_gpu_uuid
-                .clone()
-                .or_else(|| cap_entry.gpu_uuid.clone())
-                .or_else(|| gpus.first().map(|g| g.uuid.clone()));
-            chosen = Some((
-                wid,
-                url,
-                secret,
-                session,
-                gpu_sel,
-                bounded_timeout_secs(cap_entry.timeout_secs),
-            ));
-            break;
+        let Some(cap_entry) = matching_cap else {
+            continue;
+        };
+        let cpu_ok = (f_cpu as u64) >= cpu_millicores;
+        let ram_ok = (f_ram as u64) >= ram_bytes;
+        let accounting_free = f_vram.max(0) as u64;
+        if !cpu_ok || !ram_ok || accounting_free < req.min_vram_bytes {
+            continue;
         }
+        // An exact pin is admitted only on that GPU's own live free memory, never the host sum.
+        let live_for_job = match req.pin_gpu_uuid.as_deref() {
+            Some(pin) => match pinned_gpu_live_free(gpus_live.as_deref(), &gpus, pin) {
+                PinnedLiveFree::Free(bytes) => Some(live_free_i64(bytes)),
+                PinnedLiveFree::Missing | PinnedLiveFree::NoReport => Some(0),
+            },
+            None => live_free,
+        };
+        let effective = effective_vram_bytes(f_vram, live_for_job);
+        if effective < req.min_vram_bytes {
+            // Reserved capacity would allow the job, but the GPU does not have that much free right now.
+            blocked_by_live = true;
+            if req.pin_gpu_uuid.is_some() {
+                // An exact UUID is never replaced with a different GPU.
+                break;
+            }
+            continue;
+        }
+        if req.pin_gpu_uuid.is_none() && external_gpu_busy(gpu_util) {
+            blocked_by_live = true;
+            continue;
+        }
+        let gpu_sel = req
+            .pin_gpu_uuid
+            .clone()
+            .or_else(|| cap_entry.gpu_uuid.clone())
+            .or_else(|| gpus.first().map(|g| g.uuid.clone()));
+        chosen = Some((
+            wid,
+            url,
+            secret,
+            session,
+            gpu_sel,
+            bounded_timeout_secs(cap_entry.timeout_secs),
+        ));
+        break;
     }
 
     let Some((wid, url, secret, session, gpu_sel, profile_timeout)) = chosen else {
+        if blocked_by_live {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "capacity_exhausted",
+                "all matching GPUs are externally saturated or lack live free VRAM".into(),
+            ));
+        }
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             "capability_unavailable",
@@ -1778,6 +2018,75 @@ async fn handle_mcp(
 
 // === Standalone Pluggable Fleet Worker (--fleet-worker <config.json>) ===
 
+fn parse_live_gpu_telemetry(stdout: &str) -> Option<LiveGpuTelemetry> {
+    let mut gpus = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+        if parts.len() < 4 || parts.iter().any(|part| part.is_empty()) {
+            continue;
+        }
+        let free_mib: u64 = match parts[1].parse() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let total_mib: u64 = match parts[2].parse() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let util: u64 = match parts[3].parse() {
+            Ok(value) if value <= 100 => value,
+            _ => continue,
+        };
+        gpus.push(LiveGpuSample {
+            uuid: parts[0].to_string(),
+            memory_free_bytes: free_mib.saturating_mul(1024 * 1024),
+            memory_total_bytes: total_mib.saturating_mul(1024 * 1024),
+            util_pct: util,
+        });
+    }
+    if gpus.is_empty() {
+        return None;
+    }
+    let free_bytes = gpus
+        .iter()
+        .fold(0u64, |sum, gpu| sum.saturating_add(gpu.memory_free_bytes));
+    let util_pct = gpus.iter().map(|gpu| gpu.util_pct).max().unwrap_or(0);
+    Some(LiveGpuTelemetry {
+        free_bytes,
+        util_pct,
+        gpus,
+    })
+}
+
+/// Live free VRAM and utilization. Missing or hung `nvidia-smi` returns None and must not fail the worker.
+fn query_live_gpu_telemetry() -> Option<LiveGpuTelemetry> {
+    let mut cmd = Command::new("nvidia-smi");
+    cmd.args([
+        "--query-gpu=uuid,memory.free,memory.total,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]);
+    let (rc, stdout) = crate::engine::run_limited(&mut cmd, NVIDIA_SMI_TIMEOUT).ok()?;
+    if rc != 0 {
+        return None;
+    }
+    parse_live_gpu_telemetry(&stdout)
+}
+
+fn live_heartbeat_payload() -> Value {
+    match query_live_gpu_telemetry() {
+        Some(sample) => json!({
+            "live_vram_free_bytes": sample.free_bytes,
+            "gpu_util_pct": sample.util_pct,
+            "gpus_live": sample.gpus,
+        }),
+        None => json!({
+            "live_vram_free_bytes": Value::Null,
+            "gpu_util_pct": Value::Null,
+            "gpus_live": Value::Null,
+        }),
+    }
+}
+
 fn detect_local_gpus() -> Vec<GpuInfo> {
     let Ok(out) = Command::new("nvidia-smi")
         .args(["--query-gpu=uuid,name,memory.total", "--format=csv,noheader,nounits"])
@@ -2095,19 +2404,32 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
     });
     let bearer = cfg.enroll_bearer.clone();
     let hb_http = http.clone();
-    std::thread::spawn(move || loop {
-        let _ = hb_http
-            .post(enroll_url.clone())
-            .header("authorization", format!("Bearer {bearer}"))
-            .json(&enroll_body)
-            .send();
-        for _ in 0..6 {
-            std::thread::sleep(Duration::from_secs(10));
+    let detect_gpus = cfg.auto_detect_gpus;
+    std::thread::spawn(move || {
+        let beat = |payload: &Value| {
             let _ = hb_http
                 .post(hb_url.clone())
                 .header("authorization", format!("Bearer {bearer}"))
-                .json(&json!({}))
+                .json(payload)
                 .send();
+        };
+        loop {
+            let _ = hb_http
+                .post(enroll_url.clone())
+                .header("authorization", format!("Bearer {bearer}"))
+                .json(&enroll_body)
+                .send();
+            if detect_gpus {
+                beat(&live_heartbeat_payload());
+            }
+            for _ in 0..6 {
+                std::thread::sleep(Duration::from_secs(10));
+                if detect_gpus {
+                    beat(&live_heartbeat_payload());
+                } else {
+                    beat(&json!({}));
+                }
+            }
         }
     });
 
@@ -3153,6 +3475,476 @@ mod tests {
         });
 
         server.abort();
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_gpu_telemetry_parses_and_migration_keeps_existing_rows() {
+        let sample = parse_live_gpu_telemetry(
+            "GPU-aaa, 1024, 8192, 10\nGPU-bbb, 2048, 16384, 90\n",
+        )
+        .unwrap();
+        assert_eq!(sample.free_bytes, (1024 + 2048) * 1024 * 1024);
+        assert_eq!(sample.util_pct, 90);
+        assert_eq!(sample.gpus.len(), 2);
+        assert_eq!(sample.gpus[1].uuid, "GPU-bbb");
+        let mixed = parse_live_gpu_telemetry("GPU-bad, 10, 20, N/A\nGPU-ok, 30, 40, 7\n").unwrap();
+        assert_eq!(mixed.gpus.len(), 1);
+        assert_eq!(mixed.util_pct, 7);
+        assert_eq!(mixed.free_bytes, 30 * 1024 * 1024);
+        assert!(parse_live_gpu_telemetry("").is_none());
+        assert!(parse_live_gpu_telemetry("not,a,gpu\n").is_none());
+        assert_eq!(effective_vram_bytes(5_000, Some(1_000)), 1_000);
+        assert_eq!(effective_vram_bytes(500, Some(9_000)), 500);
+        assert_eq!(effective_vram_bytes(500, None), 500);
+        assert!(!external_gpu_busy(None));
+        assert!(!external_gpu_busy(Some(84)));
+        assert!(external_gpu_busy(Some(85)));
+        assert!(!external_gpu_busy(Some(101)));
+
+        let root = std::env::temp_dir().join(format!(
+            "fleet-live-migrate-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        crate::private_state::fixture_dir(&root);
+        let db_path = root.join("fleet.sqlite");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE fleet_workers(worker_id TEXT PRIMARY KEY, host TEXT NOT NULL);
+                 INSERT INTO fleet_workers(worker_id, host) VALUES ('old', 'homelab');",
+            )
+            .unwrap();
+        }
+        let config = root.join("controller.json");
+        fs::write(
+            &config,
+            json!({
+                "admin_token_sha256": sha256_hex(b"fixture"),
+                "db_path": db_path,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state = FleetState::open(&config, &root).unwrap();
+        let again = FleetState::open(&config, &root).unwrap();
+        drop(again);
+        let (host, live, util): (String, Option<i64>, Option<i64>) = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT host, live_vram_free_bytes, gpu_util_pct FROM fleet_workers WHERE worker_id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(host, "homelab");
+        assert_eq!(live, None);
+        assert_eq!(util, None);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_steers_around_external_gpu_load_and_keeps_exact_pin() {
+        let (root, state, headers) = open_state("live-gpu");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let auth = state.authenticate(&headers).unwrap();
+        let enroll = |worker_id: &str, session: &str, vram: u64, gpu: &str| {
+            serde_json::from_value(json!({
+                "worker_id": worker_id,
+                "host": "fixture",
+                "rpc_secret_hex": SECRET,
+                "rpc_session": session,
+                "rpc_url": "http://127.0.0.1:9",
+                "cpu_millicores": 8000,
+                "ram_bytes": 8 * 1024 * 1024 * 1024u64,
+                "vram_bytes": vram,
+                "gpus": [{"uuid": gpu, "name": "Test", "vram_bytes": vram}],
+                "capabilities": [{
+                    "capability": "render",
+                    "kind": "exec",
+                    "gpu_uuid": gpu,
+                    "timeout_secs": 60
+                }]
+            }))
+            .unwrap()
+        };
+        runtime.block_on(async {
+            for (worker_id, session, vram, gpu) in [
+                ("busy", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 20_000_000_000u64, "GPU-BUSY"),
+                ("idle", "cccccccccccccccccccccccccccccccc", 8_000_000_000u64, "GPU-IDLE"),
+            ] {
+                assert_eq!(
+                    handle_enroll(
+                        State(state.clone()),
+                        headers.clone(),
+                        Json(enroll(worker_id, session, vram, gpu)),
+                    )
+                    .await
+                    .status(),
+                    StatusCode::OK
+                );
+            }
+            let listed = read_json(
+                handle_list_workers(State(state.clone()), headers.clone()).await,
+            )
+            .await;
+            let before = &listed["workers"];
+            assert_eq!(before[0]["live_vram_free"], Value::Null);
+            assert_eq!(before[0]["gpu_util_pct"], Value::Null);
+            assert_eq!(before[0]["gpus_live"], Value::Null);
+        });
+
+        let beat = |worker_id: &str, body: Value| {
+            let state = state.clone();
+            let headers = headers.clone();
+            let worker_id = worker_id.to_string();
+            runtime.block_on(async move {
+                assert_eq!(
+                    handle_heartbeat(
+                        State(state),
+                        headers,
+                        AxPath(worker_id),
+                        Json(body),
+                    )
+                    .await
+                    .status(),
+                    StatusCode::OK
+                );
+            });
+        };
+        let place = |key: &str, body: Value| {
+            let req: SubmitJobRequest = serde_json::from_value(body).unwrap();
+            prepare_job(&state, &auth, key, &req)
+        };
+        let fresh_worker = |key: &str, body: Value| match place(key, body).unwrap() {
+            PrepareOutcome::Fresh(job) => job.worker_id,
+            PrepareOutcome::Replay(_) => panic!("unexpected replay"),
+        };
+        let base = json!({"capability": "render", "min_vram_bytes": 0, "input": {}});
+
+        beat(
+            "busy",
+            json!({
+                "live_vram_free_bytes": 16_000_000_000u64,
+                "gpu_util_pct": 96,
+                "gpus_live": [{
+                    "uuid": "GPU-BUSY",
+                    "memory_free_bytes": 16_000_000_000u64,
+                    "memory_total_bytes": 20_000_000_000u64,
+                    "util_pct": 96
+                }]
+            }),
+        );
+        beat(
+            "idle",
+            json!({"live_vram_free_bytes": 8_000_000_000u64, "gpu_util_pct": 3}),
+        );
+        // An empty heartbeat preserves host aggregates for older workers, but clears per-GPU
+        // detail so exact pins cannot reuse stale per-GPU VRAM.
+        beat("busy", json!({}));
+        let listed = runtime.block_on(async {
+            read_json(handle_list_workers(State(state.clone()), headers.clone()).await).await
+        });
+        let workers = listed["workers"].as_array().unwrap();
+        let busy = workers.iter().find(|w| w["worker_id"] == "busy").unwrap();
+        let idle = workers.iter().find(|w| w["worker_id"] == "idle").unwrap();
+        assert_eq!(busy["live_vram_free"], 16_000_000_000u64);
+        assert_eq!(busy["gpu_util_pct"], 96);
+        assert!(busy["gpus_live"].is_null());
+        assert_eq!(idle["gpu_util_pct"], 3);
+        assert_eq!(fresh_worker("steer-util", base.clone()), "idle");
+
+        beat("busy", json!({"gpu_util_pct": 84, "live_vram_free_bytes": 16_000_000_000u64}));
+        assert_eq!(fresh_worker("util-84", base.clone()), "busy");
+
+        beat(
+            "busy",
+            json!({"gpu_util_pct": 0, "live_vram_free_bytes": 1_000_000u64}),
+        );
+        beat(
+            "idle",
+            json!({"gpu_util_pct": 0, "live_vram_free_bytes": 8_000_000_000u64}),
+        );
+        let mut low = base.clone();
+        low["min_vram_bytes"] = json!(1_000_000_000u64);
+        assert_eq!(fresh_worker("steer-vram", low.clone()), "idle");
+
+        beat("idle", json!({"gpu_util_pct": 90}));
+        beat("busy", json!({"gpu_util_pct": 91, "live_vram_free_bytes": 16_000_000_000u64}));
+        match place("all-busy", base.clone()) {
+            Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
+            Err((_, code, _)) => panic!("expected capacity_exhausted, got {code}"),
+            Ok(_) => panic!("expected capacity_exhausted, scheduled a job"),
+        }
+
+        let mut pin = base.clone();
+        pin["pin_gpu_uuid"] = json!("GPU-BUSY");
+        assert_eq!(fresh_worker("pin-busy", pin.clone()), "busy");
+
+        beat(
+            "busy",
+            json!({
+                "live_vram_free_bytes": 1_000_000u64,
+                "gpu_util_pct": 0,
+                "gpus_live": [{
+                    "uuid": "GPU-BUSY",
+                    "memory_free_bytes": 1_000_000u64,
+                    "memory_total_bytes": 20_000_000_000u64,
+                    "util_pct": 0
+                }]
+            }),
+        );
+        beat(
+            "idle",
+            json!({"gpu_util_pct": 0, "live_vram_free_bytes": 8_000_000_000u64}),
+        );
+        let mut pin_low = low.clone();
+        pin_low["pin_gpu_uuid"] = json!("GPU-BUSY");
+        match place("pin-low", pin_low) {
+            Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
+            Err((_, code, _)) => panic!("pinned GPU should not move, got {code}"),
+            Ok(_) => panic!("pinned GPU was moved to another worker"),
+        }
+        let jobs_on_idle_for_pin: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM fleet_jobs WHERE idempotency_key='pin-low'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs_on_idle_for_pin, 0);
+
+        let mut missing = base.clone();
+        missing["pin_gpu_uuid"] = json!("GPU-MISSING");
+        match place("pin-missing", missing) {
+            Err((_, "capability_unavailable", _)) => {}
+            Err((_, code, _)) => panic!("expected exact UUID refusal, got {code}"),
+            Ok(_) => panic!("unknown GPU pin was scheduled"),
+        }
+
+        beat(
+            "busy",
+            json!({"live_vram_free_bytes": null, "gpu_util_pct": null, "gpus_live": null}),
+        );
+        beat(
+            "idle",
+            json!({"live_vram_free_bytes": null, "gpu_util_pct": null, "gpus_live": null}),
+        );
+        assert_eq!(fresh_worker("accounting-fallback", base), "busy");
+
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_gpu_uses_its_own_live_vram_not_the_host_sum() {
+        let (root, state, headers) = open_state("pin-live-vram");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let auth = state.authenticate(&headers).unwrap();
+        let card = 24_000_000_000u64;
+        let enroll = serde_json::from_value(json!({
+            "worker_id": "dual",
+            "host": "fixture",
+            "rpc_secret_hex": SECRET,
+            "rpc_session": "dddddddddddddddddddddddddddddddd",
+            "rpc_url": "http://127.0.0.1:9",
+            "cpu_millicores": 8000,
+            "ram_bytes": 8 * 1024 * 1024 * 1024u64,
+            "vram_bytes": card * 2,
+            "gpus": [
+                {"uuid": "GPU-A", "name": "A", "vram_bytes": card},
+                {"uuid": "GPU-B", "name": "B", "vram_bytes": card}
+            ],
+            "capabilities": [{
+                "capability": "render",
+                "kind": "exec",
+                "timeout_secs": 60
+            }]
+        }))
+        .unwrap();
+        runtime.block_on(async {
+            assert_eq!(
+                handle_enroll(State(state.clone()), headers.clone(), Json(enroll))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                handle_heartbeat(
+                    State(state.clone()),
+                    headers.clone(),
+                    AxPath("dual".into()),
+                    Json(json!({
+                        "live_vram_free_bytes": 21_000_000_000u64,
+                        "gpu_util_pct": 4,
+                        "gpus_live": [
+                            {
+                                "uuid": "GPU-A",
+                                "memory_free_bytes": 1_000_000_000u64,
+                                "memory_total_bytes": card,
+                                "util_pct": 4
+                            },
+                            {
+                                "uuid": "GPU-B",
+                                "memory_free_bytes": 20_000_000_000u64,
+                                "memory_total_bytes": card,
+                                "util_pct": 1
+                            }
+                        ]
+                    })),
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        });
+        let place = |key: &str, pin: &str| {
+            let req: SubmitJobRequest = serde_json::from_value(json!({
+                "capability": "render",
+                "min_vram_bytes": 8_000_000_000u64,
+                "pin_gpu_uuid": pin,
+                "input": {}
+            }))
+            .unwrap();
+            prepare_job(&state, &auth, key, &req)
+        };
+        match place("pin-a-short", "GPU-A") {
+            Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
+            Err((_, code, _)) => panic!("pinned GPU A should be capacity_exhausted, got {code}"),
+            Ok(_) => panic!("pinned GPU A was scheduled from another GPU's free VRAM"),
+        }
+        let reserved: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM fleet_jobs WHERE idempotency_key='pin-a-short'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reserved, 0);
+        match place("pin-b-room", "GPU-B") {
+            Ok(PrepareOutcome::Fresh(job)) => assert_eq!(job.worker_id, "dual"),
+            Ok(PrepareOutcome::Replay(_)) => panic!("unexpected replay"),
+            Err((_, code, _)) => panic!("pinned GPU B has enough live VRAM, got {code}"),
+        }
+        assert_eq!(
+            clamped_live_free_bytes(30_000_000_000, 24_000_000_000),
+            24_000_000_000
+        );
+
+        // Aggregate-only heartbeat (gpus_live null or empty) must fail closed for an exact pin.
+        for (tag, gpus_live_val) in [("null", json!(null)), ("empty", json!([]))] {
+            runtime.block_on(async {
+                assert_eq!(
+                    handle_heartbeat(
+                        State(state.clone()),
+                        headers.clone(),
+                        AxPath("dual".into()),
+                        Json(json!({
+                            "live_vram_free_bytes": 21_000_000_000u64,
+                            "gpu_util_pct": 4,
+                            "gpus_live": gpus_live_val
+                        })),
+                    )
+                    .await
+                    .status(),
+                    StatusCode::OK
+                );
+            });
+            let key = format!("pin-a-agg-{tag}");
+            match place(&key, "GPU-A") {
+                Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
+                Err((_, code, _)) => panic!("aggregate-only pin ({tag}) should be capacity_exhausted, got {code}"),
+                Ok(_) => panic!("aggregate-only pin ({tag}) was admitted without per-GPU telemetry"),
+            }
+            let agg_reserved: i64 = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM fleet_jobs WHERE idempotency_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(agg_reserved, 0);
+        }
+
+        // Reporting high GPU-A detail followed by a heartbeat that omits gpus_live must clear
+        // the prior per-GPU sample and fail closed for an exact pin.
+        runtime.block_on(async {
+            assert_eq!(
+                handle_heartbeat(
+                    State(state.clone()),
+                    headers.clone(),
+                    AxPath("dual".into()),
+                    Json(json!({
+                        "live_vram_free_bytes": 21_000_000_000u64,
+                        "gpu_util_pct": 1,
+                        "gpus_live": [
+                            {
+                                "uuid": "GPU-A",
+                                "memory_free_bytes": 20_000_000_000u64,
+                                "memory_total_bytes": card,
+                                "util_pct": 1
+                            },
+                            {
+                                "uuid": "GPU-B",
+                                "memory_free_bytes": 1_000_000_000u64,
+                                "memory_total_bytes": card,
+                                "util_pct": 4
+                            }
+                        ]
+                    })),
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                handle_heartbeat(
+                    State(state.clone()),
+                    headers.clone(),
+                    AxPath("dual".into()),
+                    Json(json!({
+                        "live_vram_free_bytes": 1_000_000_000u64
+                    })),
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        });
+        match place("pin-a-omitted-stale", "GPU-A") {
+            Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
+            Err((_, code, _)) => panic!("stale omitted gpus_live pin should be capacity_exhausted, got {code}"),
+            Ok(_) => panic!("stale omitted gpus_live pin was admitted from old sample"),
+        }
+        let stale_reserved: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM fleet_jobs WHERE idempotency_key='pin-a-omitted-stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_reserved, 0);
+
         drop(runtime);
         drop(state);
         fs::remove_dir_all(root).unwrap();
