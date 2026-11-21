@@ -51,6 +51,13 @@ def save(path, payload):
     pending.write_text(json.dumps(payload))
     pending.replace(path)
 
+def next_count(name):
+    path = root / name
+    count = int(path.read_text()) if path.exists() else 0
+    count += 1
+    path.write_text(str(count))
+    return count
+
 def guest(name):
     return root / "guests" / name
 
@@ -60,7 +67,13 @@ if action == "usage":
     marker.unlink(missing_ok=True)
     if options.get("usage_fail") or stopped and options.get("after_fail"):
         sys.exit(2)
-    balance = options.get("after", "248.75") if stopped else options.get("before", "250.00")
+    balances = options.get("usage_balances")
+    if isinstance(balances, list) and balances:
+        balance = balances[min(next_count("usage_count") - 1, len(balances) - 1)]
+    else:
+        balance = options.get("after", "248.75") if stopped else options.get("before", "250.00")
+    with (root / "usage_marks").open("a") as marks:
+        marks.write(f"{time.monotonic():.6f} {balance}{chr(10)}")
     print(options.get("usage_output", f"Current balance: {balance} compute units"))
     print("Usage rate: 0.00/hr")
     print("Active assignments: 0")
@@ -84,6 +97,13 @@ elif action == "sessions":
         print("[colab] Run 'pip install --upgrade google-colab-cli'")
         print("[colab] To silence this check, change your settings.")
     rows = {**options.get("foreign", {}), **owned}
+    reveal_on = options.get("reveal_owned_session_on_call")
+    if reveal_on is not None and next_count("sessions_count") == reveal_on:
+        state = Path(os.environ["DIFFUSER_COLAB_STATE_DIR"])
+        intents = [json.loads(path.read_text()) for pattern in ("*/active_intent.json", "*/seat-*.intent.json")
+                   for path in state.glob(pattern)]
+        for intent in intents:
+            rows[intent["session_name"]] = intent.get("gpu", "L4")
     if mode == "anonymous":
         rows["?"] = "L4"
     if not rows:
@@ -104,6 +124,14 @@ elif action == "new":
     assert intent["created_at"] == intent["started_at"]
     assert intent["owner_pid"] == os.getppid()
     (root / "intent_seen.json").write_text(json.dumps(intent))
+    with (root / "new_marks").open("a") as marks:
+        marks.write(f"{time.monotonic():.6f}\n")
+    failures = options.get("transient_new_failures", 0)
+    seen_path = root / "transient_new_count"
+    seen = int(seen_path.read_text()) if seen_path.exists() else 0
+    if seen < failures:
+        seen_path.write_text(str(seen + 1))
+        sys.exit(3)
     (root / "stopped").unlink(missing_ok=True)
     owned[name] = options.get("provider_gpu", gpu)
     save(live, owned)
@@ -192,6 +220,8 @@ class ColabAdaptersTest(unittest.TestCase):
 
     def options(self, **kwargs):
         (self.fixture / "options.json").write_text(json.dumps(kwargs), encoding="utf-8")
+        for name in ("transient_new_count", "usage_count", "sessions_count", "usage_marks", "new_marks"):
+            (self.fixture / name).unlink(missing_ok=True)
 
     def calls(self):
         log = self.fixture / "calls.jsonl"
@@ -600,6 +630,7 @@ class ColabAdaptersTest(unittest.TestCase):
             self.worker("gpu", "T4", "--max-walltime", "0"),
             self.worker("gpu", "T4", "--max-seats", "-1"),
             self.worker("gpu", "T4", "--max-account-vms", "0"),
+            self.worker("gpu", "T4", "--idle-timeout", "0"),
         ):
             with self.subTest(command=command):
                 result = subprocess.run(command, input='{"action":"probe"}', capture_output=True, text=True,
@@ -1121,6 +1152,151 @@ os._exit(0)
         result = self.worker_request({"action": "probe"}, "gpu", "T4", *flags)
         self.assertTrue(result["ok"], result)
         self.assertFalse(path.exists())
+
+    def test_idle_watchdog_aborts_silence_and_allows_progress(self):
+        stalled = self.invoke({
+            "action": "exec", "command": "sleep 30", "timeout_secs": 30, "idle_timeout_secs": 1,
+        })
+        self.assertEqual(stalled["error"], "idle_timeout")
+        self.assert_clean(stalled)
+        self.assertFalse((self.fixture / "live.json").exists() and json.loads(
+            (self.fixture / "live.json").read_text()
+        ))
+        started = time.monotonic()
+        active = self.invoke({
+            "action": "exec",
+            "command": "python3 -c 'import sys,time\n"
+                       "for i in range(8):\n"
+                       " print(i, flush=True)\n"
+                       " sys.stderr.write(str(i)+\"\\n\")\n"
+                       " sys.stderr.flush()\n"
+                       " time.sleep(0.25)'",
+            "timeout_secs": 30,
+            "idle_timeout_secs": 1,
+        })
+        elapsed = time.monotonic() - started
+        self.assertTrue(active["ok"], active)
+        self.assertGreaterEqual(elapsed, 1.2)
+        self.assert_clean(active)
+        stderr_only = self.invoke({
+            "action": "exec",
+            "command": "python3 -c 'import sys,time\n"
+                       "for i in range(8):\n"
+                       " sys.stderr.write(str(i)+\"\\n\")\n"
+                       " sys.stderr.flush()\n"
+                       " time.sleep(0.25)'",
+            "timeout_secs": 30,
+            "idle_timeout_secs": 1,
+        })
+        self.assertTrue(stderr_only["ok"], stderr_only)
+        self.assert_clean(stderr_only)
+        offset = len(self.actions())
+        invalid = self.invoke({"action": "exec", "command": "true", "idle_timeout_secs": "900"})
+        self.assertEqual(invalid["error"], "invalid_idle_timeout_secs")
+        self.assertEqual(self.actions()[offset:], [])
+        status = self.invoke({"action": "status"})
+        self.assertEqual(status["idle_timeout_secs"], 900)
+        clamped = self.invoke({"action": "status"}, DIFFUSER_COLAB_IDLE_TIMEOUT_SECS="99999")
+        self.assertEqual(clamped["idle_timeout_secs"], 5400)
+        configured = self.worker_request({"action": "status"}, "gpu", "L4", "--idle-timeout", "30")
+        self.assertEqual(configured["idle_timeout_secs"], 30)
+
+    def test_transient_allocation_retries_once_then_fails_closed(self):
+        from engine import interruptible_sleep
+
+        delay = {"DIFFUSER_COLAB_ALLOC_RETRY_DELAY_SECS": "0.05"}
+        self.options(transient_new_failures=1)
+        offset = len(self.actions())
+        result = self.invoke({"action": "exec", "command": "true", "timeout_secs": 60}, **delay)
+        self.assertTrue(result["ok"], result)
+        self.assert_clean(result)
+        news = [call for call in self.calls()[offset:] if call[0] == "new"]
+        self.assertEqual(len(news), 2)
+        self.assertNotEqual(news[0][2], news[1][2])
+        self.assertEqual(news[1][2], result["session_name"])
+        marks = [float(line) for line in (self.fixture / "new_marks").read_text().splitlines()]
+        self.assertGreaterEqual(marks[-1] - marks[-2], 0.05)
+        self.assertFalse(json.loads((self.fixture / "live.json").read_text()))
+        intent = json.loads((self.fixture / "intent_seen.json").read_text())
+        self.assertEqual(intent["session_name"], result["session_name"])
+        self.assertEqual(intent["created_at"], intent["started_at"])
+
+        self.options(transient_new_failures=4)
+        offset = len(self.actions())
+        failed = self.invoke({"action": "exec", "command": "true", "timeout_secs": 60}, **delay)
+        self.assertEqual(failed["error"], "allocation_failed")
+        self.assert_clean(failed)
+        failed_news = [call for call in self.calls()[offset:] if call[0] == "new"]
+        self.assertEqual(len(failed_news), 2)
+        self.assertEqual(json.loads((self.fixture / "live.json").read_text()), {})
+
+        self.options(new_fail=True)
+        offset = len(self.actions())
+        owned = self.invoke({"action": "exec", "command": "true", "timeout_secs": 60}, **delay)
+        self.assertEqual(owned["error"], "allocation_failed")
+        self.assertEqual([call[0] for call in self.calls()[offset:]].count("new"), 1)
+        self.assert_clean(owned)
+
+        self.options(transient_new_failures=1)
+        offset = len(self.actions())
+        tight = self.invoke({"action": "exec", "command": "true", "timeout_secs": 5})
+        self.assertEqual(tight["error"], "allocation_failed")
+        self.assertEqual([call[0] for call in self.calls()[offset:]].count("new"), 1)
+        self.assert_clean(tight)
+
+        flag = {"stop": False}
+
+        def cancel():
+            return flag["stop"]
+
+        def flip():
+            time.sleep(0.05)
+            flag["stop"] = True
+
+        import threading
+        threading.Thread(target=flip).start()
+        started = time.monotonic()
+        with self.assertRaisesRegex(Refusal, "^interrupted$"):
+            interruptible_sleep(5, time.monotonic() + 10, cancel)
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_retry_refuses_when_balance_drops_below_floor_during_backoff(self):
+        delay = {"DIFFUSER_COLAB_ALLOC_RETRY_DELAY_SECS": "0.05"}
+        self.options(
+            transient_new_failures=1,
+            usage_balances=["250.00", "250.00", "199.00", "199.00"],
+        )
+        offset = len(self.actions())
+        result = self.invoke({"action": "exec", "command": "true", "timeout_secs": 60}, **delay)
+        self.assertEqual(result["error"], "cu_below_floor")
+        self.assert_clean(result)
+        actions = self.actions()[offset:]
+        self.assertEqual(actions[:5], ["usage", "new", "sessions", "usage", "usage"])
+        self.assertEqual(actions.count("new"), 1)
+        new_at = float((self.fixture / "new_marks").read_text().splitlines()[0])
+        usage_rows = (self.fixture / "usage_marks").read_text().splitlines()
+        recheck_at, recheck_balance = usage_rows[2].split()
+        self.assertEqual(recheck_balance, "199.00")
+        self.assertGreaterEqual(float(recheck_at) - new_at, 0.05)
+        self.assertEqual(result["cu_before"], 250.0)
+
+    def test_retry_refuses_when_owned_session_appears_during_backoff(self):
+        delay = {"DIFFUSER_COLAB_ALLOC_RETRY_DELAY_SECS": "0.05"}
+        self.options(transient_new_failures=1, reveal_owned_session_on_call=2)
+        offset = len(self.actions())
+        result = self.invoke({"action": "exec", "command": "true", "timeout_secs": 60}, **delay)
+        self.assertEqual(result["error"], "allocation_failed")
+        self.assert_clean(result)
+        actions = self.actions()[offset:]
+        self.assertEqual(
+            actions,
+            ["usage", "new", "sessions", "usage", "usage", "sessions", "stop", "sessions", "usage"],
+        )
+        self.assertEqual(actions.count("new"), 1)
+        new_at = float((self.fixture / "new_marks").read_text().splitlines()[0])
+        usage_rows = (self.fixture / "usage_marks").read_text().splitlines()
+        recheck_at = float(usage_rows[2].split()[0])
+        self.assertGreaterEqual(recheck_at - new_at, 0.05)
 
 
 if __name__ == "__main__":

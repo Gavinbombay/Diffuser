@@ -28,6 +28,9 @@ from secure_io import (
 
 CONTROL_TIMEOUT = 10
 DEFAULT_TIMEOUT = 180
+DEFAULT_IDLE_TIMEOUT_SECS = 900
+DEFAULT_ALLOC_RETRY_DELAY_SECS = 30.0
+MAX_ALLOC_RETRIES = 1
 MAX_CLI_OUTPUT = 256 * 1024
 JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 GENERATION = re.compile(r"[0-9a-f]{12}")
@@ -191,6 +194,19 @@ def group_exists(pgid):
     return True
 
 
+def interruptible_sleep(seconds, deadline, cancelled):
+    end = time.monotonic() + seconds
+    while True:
+        if cancelled():
+            raise Refusal("interrupted")
+        now = time.monotonic()
+        if now >= deadline:
+            raise Refusal("timeout")
+        if now >= end:
+            return
+        time.sleep(min(0.05, end - now, deadline - now))
+
+
 def drain_group(child, grace=0.2, kill_wait=1.0):
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, kill_wait)):
         with contextlib.suppress(ProcessLookupError):
@@ -222,7 +238,7 @@ class Engine:
         self.seat_fds = ()
         self.account_fd = None
 
-    def run_cli(self, args, deadline, cancelled, cli_config=None, file_limit=None):
+    def run_cli(self, args, deadline, cancelled, cli_config=None, file_limit=None, idle_timeout=None):
         config_path = cli_config or self.cli_config
         argv = [self.colab_bin, "--config", str(config_path), *args]
         if "pay" in argv:
@@ -258,6 +274,7 @@ class Engine:
         output = bytearray()
         captured = 0
         has_stderr = False
+        last_activity = time.monotonic()
         try:
             with child.stdout, child.stderr, selectors.DefaultSelector() as selector:
                 selector.register(child.stdout, selectors.EVENT_READ)
@@ -265,14 +282,22 @@ class Engine:
                 while selector.get_map() or child.poll() is None:
                     if cancelled():
                         raise Refusal("interrupted")
-                    remaining = deadline - time.monotonic()
+                    now = time.monotonic()
+                    remaining = deadline - now
                     if remaining <= 0:
                         raise Refusal("timeout")
-                    for key, _ in selector.select(min(remaining, 0.1)):
+                    if idle_timeout is not None and now - last_activity >= idle_timeout:
+                        raise Refusal("idle_timeout")
+                    wait = min(remaining, 0.1)
+                    if idle_timeout is not None:
+                        wait = min(wait, max(0.0, idle_timeout - (now - last_activity)))
+                    for key, _ in selector.select(wait):
                         chunk = os.read(key.fd, 8192)
                         if not chunk:
                             selector.unregister(key.fileobj)
                             continue
+                        # Bytes count as progress, including the chunk that crosses the capture cap.
+                        last_activity = time.monotonic()
                         captured += len(chunk)
                         if captured > MAX_CLI_OUTPUT:
                             raise Refusal("cli_output_limit")
@@ -373,6 +398,7 @@ class Engine:
             "min_cu_floor": self.floor, "max_cu_per_job": cfg.max_cu_per_job,
             "max_seats": cfg.max_seats, "max_account_vms": account_limit(cfg.max_account_vms),
             "max_walltime_secs": cfg.max_walltime_secs, "cu_balance": None, "session_count": None,
+            "idle_timeout_secs": self.clamp_idle(self.configured_idle_timeout()),
         }
         errors = {}
         # The pinned CLI updates session metadata during listing. Use scratch state for status.
@@ -402,6 +428,10 @@ class Engine:
         timeout = request.get("timeout_secs", min(DEFAULT_TIMEOUT, cfg.max_walltime_secs))
         if type(timeout) is not int or not 1 <= timeout <= cfg.max_walltime_secs:
             raise Refusal("invalid_timeout_secs")
+        if "idle_timeout_secs" in request:
+            idle_timeout = self.clamp_idle(request["idle_timeout_secs"])
+        else:
+            idle_timeout = self.clamp_idle(self.configured_idle_timeout())
         max_cu = request.get("max_cu", cfg.max_cu_per_job)
         if type(max_cu) not in (int, float) or not 0 < max_cu <= cfg.max_cu_per_job:
             raise Refusal("invalid_max_cu")
@@ -413,7 +443,40 @@ class Engine:
         job_id = os.environ.get("DIFFUSER_JOB_ID") or request.get("job_id", uuid.uuid4().hex[:12])
         if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id):
             raise Refusal("invalid_job_id")
-        return gpu, timeout, max_cu, command, job_id
+        return gpu, timeout, max_cu, command, job_id, idle_timeout
+
+    def configured_idle_timeout(self):
+        if self.config.idle_timeout_secs is not None:
+            return self.config.idle_timeout_secs
+        raw = os.environ.get("DIFFUSER_COLAB_IDLE_TIMEOUT_SECS")
+        if raw is None or not raw.strip():
+            return DEFAULT_IDLE_TIMEOUT_SECS
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise Refusal("invalid_idle_timeout_secs") from None
+
+    def clamp_idle(self, value):
+        if type(value) is not int:
+            raise Refusal("invalid_idle_timeout_secs")
+        ceiling = self.config.max_walltime_secs
+        if value < 1:
+            return 1
+        if value > ceiling:
+            return ceiling
+        return value
+
+    def alloc_retry_delay_secs(self):
+        raw = os.environ.get("DIFFUSER_COLAB_ALLOC_RETRY_DELAY_SECS")
+        if raw is None or not raw.strip():
+            return DEFAULT_ALLOC_RETRY_DELAY_SECS
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise Refusal("invalid_alloc_retry_delay") from None
+        if not math.isfinite(value) or value < 0:
+            raise Refusal("invalid_alloc_retry_delay")
+        return value
 
     def session_name(self, job_id, generation):
         return f"diffuser-{self.config.lane_id}-{job_id}-{generation}"
@@ -427,9 +490,10 @@ class Engine:
             finally:
                 self.account_fd = None
 
-    def check_account_capacity(self):
+    def account_reservation_count(self):
         count = 0
         limit = account_limit(self.config.max_account_vms)
+        own_paths = []
         for name in directory_entries(self.state_root):
             directory = self.state_root / name
             if not LANE_ID.fullmatch(directory.name):
@@ -438,8 +502,8 @@ class Engine:
             if not lane_directory(self.state_root, name):
                 continue
             paths = intent_paths(directory)
-            if directory == self.state_dir and len(paths) >= self.config.max_seats:
-                raise Refusal("seat_busy")
+            if directory == self.state_dir:
+                own_paths = paths
             count += len(paths)
             for path in paths:
                 try:
@@ -448,6 +512,12 @@ class Engine:
                     continue
                 if type(other_limit) is int and other_limit > 0:
                     limit = min(limit, other_limit)
+        return count, limit, own_paths
+
+    def check_account_capacity(self):
+        count, limit, own_paths = self.account_reservation_count()
+        if len(own_paths) >= self.config.max_seats:
+            raise Refusal("seat_busy")
         if count >= limit:
             raise Refusal("account_capacity_reached")
         return limit
@@ -575,12 +645,15 @@ class Engine:
                 reasons.append("intent_release_failed")
         return self.quarantine(session, leaked, reasons)
 
-    def execute_remote(self, session, gpu, command, deadline, cancelled, uploads=(), downloads=()):
+    def execute_remote(
+        self, session, gpu, command, deadline, cancelled, uploads=(), downloads=(), idle_timeout=None,
+    ):
         marker = "DIFFUSER_" + uuid.uuid4().hex
+        idle_for_guest = idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT_SECS
         # Verify the guest GPU before executing the workload. The provider listing also
         # confirms the literal SKU, including G4, whose guest model name may differ.
         script = f"""
-import csv, hashlib, json, os, re, stat, subprocess, threading
+import csv, hashlib, json, os, re, stat, subprocess, sys, threading, time
 
 marker = {marker!r}
 requested = {gpu!r}
@@ -589,28 +662,55 @@ denied = {tuple(name.upper() for name in self.config.forbidden_gpus)!r}
 known = {tuple(PRESETS)!r}
 uploads = {uploads!r}
 downloads = {downloads!r}
+idle_seconds = {float(idle_for_guest)!r}
 receipt = {{"gpu_observed": None, "exit_code": None, "error": None}}
 {GUEST_ARTIFACTS if uploads or downloads else ""}
 # Drain guest output in fixed-size chunks while retaining only a preview.
+# A single progress byte is enough for the adapter idle watchdog. Workload text stays out of the CLI capture.
 def run_guest(argv, shell=False):
-    read_fd, write_fd = os.pipe()
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
     preview = bytearray()
+    pulse_lock = threading.Lock()
+    pulse_state = {{"last": 0.0}}
+    interval = max(0.2, float(idle_seconds) / 3.0)
 
-    def drain():
-        with os.fdopen(read_fd, "rb") as stream:
-            for chunk in iter(lambda: stream.read(8192), b""):
-                preview.extend(chunk[:8193 - len(preview)])
+    def note(chunk, keep):
+        if keep:
+            preview.extend(chunk[:8193 - len(preview)])
+        now = time.monotonic()
+        with pulse_lock:
+            if now - pulse_state["last"] < interval:
+                return
+            pulse_state["last"] = now
+        sys.stdout.write(".")
+        sys.stdout.flush()
 
-    reader = threading.Thread(target=drain)
-    reader.start()
+    def drain(fd, keep):
+        try:
+            while True:
+                chunk = os.read(fd, 8192)
+                if not chunk:
+                    break
+                note(chunk, keep)
+        finally:
+            os.close(fd)
+
+    threads = (
+        threading.Thread(target=drain, args=(out_r, True)),
+        threading.Thread(target=drain, args=(err_r, False)),
+    )
+    for thread in threads:
+        thread.start()
     try:
         result = subprocess.run(
-            argv, shell=shell, stdin=subprocess.DEVNULL, stdout=write_fd,
-            stderr=subprocess.DEVNULL,
+            argv, shell=shell, stdin=subprocess.DEVNULL, stdout=out_w, stderr=err_w,
         )
     finally:
-        os.close(write_fd)
-        reader.join()
+        os.close(out_w)
+        os.close(err_w)
+        for thread in threads:
+            thread.join()
     return result.returncode, preview
 
 try:
@@ -665,7 +765,7 @@ print("\\n" + marker + json.dumps(receipt), flush=True)
                 raise Refusal("timeout")
             result = self.run_cli(
                 ["exec", "-s", session, "-f", str(script_file), "--timeout", str(remaining)],
-                deadline, cancelled,
+                deadline, cancelled, idle_timeout=idle_timeout,
             )
         if result.returncode or result.has_stderr:
             raise Refusal("command_failed")
@@ -717,8 +817,50 @@ print("\\n" + marker + json.dumps(receipt), flush=True)
             receipt["stdout"] = compact_output(stdout)
         return receipt
 
+    def allocation_can_retry(self, session, balance, deadline, cancelled, retries):
+        if retries >= MAX_ALLOC_RETRIES:
+            return False
+        try:
+            named, anonymous = self.account_sessions(cancelled, deadline)
+        except Refusal as exc:
+            if str(exc) == "interrupted":
+                raise
+            return False
+        if session in named or anonymous:
+            return False
+        try:
+            after = self.usage(cancelled, deadline=deadline)
+        except Refusal as exc:
+            if str(exc) == "interrupted":
+                raise
+            return False
+        if after != balance:
+            return False
+        delay = self.alloc_retry_delay_secs()
+        return time.monotonic() + delay < deadline
+
+    def recheck_retry_admission(self, session, balance, deadline, cancelled):
+        """Re-read the shared account immediately before the only retry allocation."""
+        after = self.usage(cancelled, deadline=deadline)
+        if after < Decimal(str(self.floor)):
+            raise Refusal("cu_below_floor")
+        if after != balance:
+            raise Refusal("allocation_failed")
+        named, anonymous = self.account_sessions(cancelled, deadline)
+        prefix = f"diffuser-{self.config.lane_id}-"
+        owned = anonymous or session in named or any(name.startswith(prefix) for name in named)
+        if owned:
+            raise Refusal("allocation_failed")
+        active = len(named) + anonymous
+        reserved, limit, _ = self.account_reservation_count()
+        # This attempt already holds its intent. Other reservations and listed VMs must
+        # still fit under the account cap.
+        others = max(0, reserved - 1)
+        if active >= limit or others >= limit:
+            raise Refusal("account_capacity_reached")
+
     def allocate(self, params, cancelled, artifacts, scratch):
-        gpu, timeout, max_cu, command, job_id = params
+        gpu, timeout, max_cu, command, job_id, idle_timeout = params
         deadline = time.monotonic() + timeout
 
         def check_deadline():
@@ -756,9 +898,26 @@ print("\\n" + marker + json.dumps(receipt), flush=True)
                 }
                 reserving = True
                 write_state(self.intent_path, intent)
-                new = self.run_cli(["new", "-s", session, "--gpu", gpu], deadline, cancelled)
-                if new.returncode:
-                    raise Refusal("allocation_failed")
+                retries = 0
+                while True:
+                    check_deadline()
+                    new = self.run_cli(["new", "-s", session, "--gpu", gpu], deadline, cancelled)
+                    if not new.returncode:
+                        break
+                    if not self.allocation_can_retry(session, balance, deadline, cancelled, retries):
+                        raise Refusal("allocation_failed")
+                    retries += 1
+                    # Sleep on the failed generation. The next intent is written only
+                    # after the account still clears the same admission checks.
+                    interruptible_sleep(self.alloc_retry_delay_secs(), deadline, cancelled)
+                    self.recheck_retry_admission(session, balance, deadline, cancelled)
+                    generation = uuid.uuid4().hex[:12]
+                    session = self.session_name(job_id, generation)
+                    intent["generation"] = generation
+                    intent["session_name"] = session
+                    intent["started_at"] = intent["created_at"]
+                    result["session_name"] = session
+                    write_state(self.intent_path, intent)
                 named, _ = self.account_sessions(cancelled, deadline)
                 if named.get(session) != gpu:
                     raise Refusal("gpu_mismatch" if session in named else "allocation_unverified")
@@ -766,6 +925,7 @@ print("\\n" + marker + json.dumps(receipt), flush=True)
                 prepared = self.execute_remote(
                     session, gpu, None, deadline, cancelled,
                     uploads=[remote for _, remote in artifacts.uploads],
+                    idle_timeout=idle_timeout,
                 )
                 if prepared["error"]:
                     raise Refusal(prepared["error"])
@@ -780,6 +940,7 @@ print("\\n" + marker + json.dumps(receipt), flush=True)
             remote = self.execute_remote(
                 session, gpu, command, deadline, cancelled,
                 downloads=[remote for _, remote in artifacts.downloads],
+                idle_timeout=idle_timeout,
             )
             metadata = remote.pop("artifact_metadata", [])
             result.update(remote)

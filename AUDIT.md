@@ -37,3 +37,10 @@ All six leads identified during the full high-effort pass were remediated and in
 - **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`).
 - **Closed findings**: Zero-resource async capacity bypass (enforced 100 millicores + 64 MiB minima and atomic 16-job per-actor/project in-flight cap), synchronous disconnect capacity leak (unified cancellation-independent background dispatch with oneshot reply), and synchronous `lanes-ctl` omitted-timeout client wait alignment (`21660 s`).
 - **Result**: `0` open confirmed findings, `0` open `needs_validation`, `9/9` fleet tests passing in isolated `bwrap` sandbox, both Node validators exit `0`.
+
+## Production Hardening v2 Delta Audit (2026-11-21)
+
+- **Scope**: `src/cosp/fleet.rs` (live `nvidia-smi` free-VRAM + `gpu_util_pct` heartbeat telemetry, per-GPU `gpus_live` freshness, external-load steering) and `adapters/colab/` (idle progress watchdog `idle_timeout_secs`, transient `allocation_failed` single retry with post-backoff re-admission).
+- **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`), 4-iteration delta verification.
+- **Closed findings**: Post-backoff Colab retry state race (`recheck_retry_admission` verifies CU balance/floor, active sessions, and VM cap after backoff), aggregate-only exact-pin admission (`PinnedLiveFree::NoReport` fails closed for exact pins with positive VRAM minimums), and stale per-GPU telemetry reuse on omitted heartbeats (`handle_heartbeat` clears `gpus_live_json` when omitted).
+- **Result**: `CLEAN_PASS` (`0` open confirmed findings, `0` open `needs_validation`, `12/12` fleet tests + `43/43` Colab adapter tests passing, both Node validators exit `0`).

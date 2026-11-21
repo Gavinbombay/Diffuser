@@ -42,6 +42,7 @@ class LaneConfig:
     max_seats: int = 1
     max_account_vms: Optional[int] = None
     legacy_seat: bool = False
+    idle_timeout_secs: Optional[int] = None
 
 
 def lane_id(value):
@@ -115,6 +116,7 @@ def add_lane_arguments(parser):
     parser.add_argument("--max-seats", type=argument_type(positive_int), default=1)
     parser.add_argument("--max-account-vms", type=argument_type(positive_int))
     parser.add_argument("--parked", action="store_true")
+    parser.add_argument("--idle-timeout", type=argument_type(positive_int))
 
 
 def lane_config(args):
@@ -127,4 +129,5 @@ def lane_config(args):
         args.lane, allowed, args.min_cu_floor, args.max_cu or preset.max_cu_per_job,
         args.max_walltime or preset.max_walltime_secs, not args.parked,
         args.forbid_gpus, args.max_seats, args.max_account_vms,
+        idle_timeout_secs=args.idle_timeout,
     )
