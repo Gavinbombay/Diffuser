@@ -5257,7 +5257,7 @@ fn fixture_connect(
     }
     let recv = unsafe { std::fs::File::from_raw_fd(pair[0]) };
     let send = unsafe { std::fs::File::from_raw_fd(pair[1]) };
-    let helper="/home/scott/.hermes/workspaces/diffuser-trio-plus/jobs/r5-s1-native-terra/out/runtime/turn-003-p-fixture/connect.py";
+    let helper="/tmp/diffuser-fixture/runtime/turn-003-p-fixture/connect.py";
     let mut child = FixtureReap(
         Command::new("/usr/bin/nsenter")
             .args([
@@ -5587,7 +5587,7 @@ fn run_scoped_controller_fixture(ending: ControllerEnding) {
     );
     let recv = unsafe { std::fs::File::from_raw_fd(pair[0]) };
     let send = unsafe { std::fs::File::from_raw_fd(pair[1]) };
-    let fixture = "/home/scott/.hermes/workspaces/diffuser-trio-plus/jobs/r5-s1-native-terra/out/runtime/turn-003-p-fixture";
+    let fixture = "/tmp/diffuser-fixture/runtime/turn-003-p-fixture";
     let mut command = fixture_scope_command(&keeper_unit, "25%", "134217728", "16");
     command
         .args([
@@ -10903,7 +10903,7 @@ mod bridge_v2_integration {
     #[test]
     fn bridge_v2_ordinary_p_startup() {
         if std::env::var("DIFFUSER_LA_BRIDGE_P").as_deref() != Ok("1") {
-            let driver = std::env::var_os("DIFFUSER_LA_BRIDGE_DRIVER").unwrap_or_else(|| "/home/scott/.hermes/workspaces/diffuser-trio-plus/jobs/r5-s1-native-terra/out/runtime/turn-016-bridge/fixture_driver-normal.py".into());
+            let driver = std::env::var_os("DIFFUSER_LA_BRIDGE_DRIVER").unwrap_or_else(|| "/tmp/diffuser-fixture/runtime/turn-016-bridge/fixture_driver-normal.py".into());
             let output = std::process::Command::new("/usr/bin/timeout")
                 .args(["-k", "2s", "75s", "/usr/bin/python3"])
                 .arg(driver)

@@ -21,7 +21,7 @@ pub(crate) async fn h_agent_pull(
             .as_str()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/mnt/sn850x/lanes/gpu-backlog"));
-        let snapshot = card_state::refresh(&state_dir, now, |p| fs::read(p));
+        let snapshot = card_state::refresh(&state_dir, now);
         let card = &snapshot["colab-l4"];
         *a.cards.lock().unwrap() = snapshot.clone();
         let registered = load_registry().ok().is_some_and(|workers| {

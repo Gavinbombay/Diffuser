@@ -11,13 +11,16 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use lane_router::transport::{private_http_client, private_http_url};
+use reqwest::Url;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
-    io::Write,
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -29,6 +32,9 @@ use subtle::ConstantTimeEq;
 const HEARTBEAT_TTL_MS: u64 = 45_000;
 const MAX_RPC_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+const RPC_MAX_AGE_MS: u64 = 60_000;
+const RPC_FUTURE_SKEW_MS: u64 = 5_000;
+const MAX_RPC_NONCES: usize = 8192;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct GpuInfo {
@@ -132,17 +138,51 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn random_id() -> io::Result<String> {
+    let mut bytes = [0; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(hex::encode(bytes))
+}
+
+fn is_random_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn fleet_base_url(raw: &str) -> Option<Url> {
+    Url::parse(raw).ok().filter(|url| {
+        private_http_url(url) && url.query().is_none() && url.fragment().is_none()
+    })
+}
+
+fn fleet_endpoint(base: &Url, endpoint: &str) -> Url {
+    let mut url = base.clone();
+    let path = format!("{}{}", url.path().trim_end_matches('/'), endpoint);
+    url.set_path(&path);
+    url
+}
+
 fn sign_rpc(secret_hex: &str, body: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(secret_hex.as_bytes());
-    h.update(b"\0diffuser-fleet-rpc/v1\0");
-    h.update(body);
-    hex::encode(h.finalize())
+    let message = [b"diffuser-fleet-rpc/v2\0".as_slice(), body].concat();
+    let key = Sha256::digest(secret_hex.as_bytes()).into();
+    hex::encode(super::la_adapter::receipt_mac(&key, &message))
 }
 
 fn verify_rpc(secret_hex: &str, body: &[u8], provided: &str) -> bool {
     let expected = sign_rpc(secret_hex, body);
     expected.len() == provided.len() && bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+}
+
+fn add_rpc_session_column(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fleet_workers') WHERE name='rpc_session')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute("ALTER TABLE fleet_workers ADD COLUMN rpc_session TEXT", [])?;
+    }
+    tx.commit()
 }
 
 fn err_resp(status: StatusCode, code: &str, message: &str) -> Response {
@@ -198,7 +238,7 @@ impl FleetState {
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("fleet_mkdir:{e}"))?;
         }
-        let conn = Connection::open(&db_path).map_err(|e| format!("fleet_db_open:{e}"))?;
+        let mut conn = Connection::open(&db_path).map_err(|e| format!("fleet_db_open:{e}"))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
@@ -257,10 +297,9 @@ impl FleetState {
              );",
         )
         .map_err(|e| format!("fleet_schema:{e}"))?;
+        add_rpc_session_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
 
-        let http = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
+        let http = private_http_client()
             .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| format!("fleet_http:{e}"))?;
@@ -385,6 +424,7 @@ struct EnrollRequest {
     host: String,
     rpc_url: String,
     rpc_secret_hex: String,
+    rpc_session: String,
     cpu_millicores: u64,
     ram_bytes: u64,
     vram_bytes: u64,
@@ -401,8 +441,11 @@ async fn handle_enroll(
     if !state.check_admin(&headers) {
         return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
     }
-    if req.worker_id.trim().is_empty() || req.rpc_url.trim().is_empty() || req.rpc_secret_hex.len() < 32 {
-        return err_resp(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "missing worker_id, rpc_url, or rpc_secret_hex");
+    let Some(rpc_url) = fleet_base_url(&req.rpc_url) else {
+        return err_resp(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "invalid RPC URL");
+    };
+    if req.worker_id.trim().is_empty() || req.rpc_secret_hex.len() < 32 || !is_random_id(&req.rpc_session) {
+        return err_resp(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "invalid worker_id, rpc_secret_hex, or rpc_session");
     }
     let gpus_json = serde_json::to_string(&req.gpus).unwrap_or_else(|_| "[]".into());
     let caps_json = serde_json::to_string(&req.capabilities).unwrap_or_else(|_| "[]".into());
@@ -411,12 +454,13 @@ async fn handle_enroll(
         return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
     };
     let res = conn.execute(
-        "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, cpu_reserved, ram_reserved, vram_reserved, gpus_json, capabilities_json, status, last_heartbeat_ms)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,0,?8,?9,'active',?10)
+        "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, cpu_reserved, ram_reserved, vram_reserved, gpus_json, capabilities_json, status, last_heartbeat_ms, rpc_session)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,0,?8,?9,'active',?10,?11)
          ON CONFLICT(worker_id) DO UPDATE SET
            host=excluded.host,
            rpc_url=excluded.rpc_url,
            rpc_secret_hex=excluded.rpc_secret_hex,
+           rpc_session=excluded.rpc_session,
            cpu_total=excluded.cpu_total,
            ram_total=excluded.ram_total,
            vram_total=excluded.vram_total,
@@ -430,14 +474,15 @@ async fn handle_enroll(
         params![
             req.worker_id,
             req.host,
-            req.rpc_url,
+            rpc_url.as_str(),
             req.rpc_secret_hex,
             req.cpu_millicores as i64,
             req.ram_bytes as i64,
             req.vram_bytes as i64,
             gpus_json,
             caps_json,
-            ts
+            ts,
+            req.rpc_session,
         ],
     );
     if res.is_err() {
@@ -761,7 +806,7 @@ fn submit_job_inner(
     let input_str = serde_json::to_string(&req.input).unwrap_or_else(|_| "{}".into());
 
     // Step 1: Atomic idempotency check + scheduler match + reservation
-    let (job_id, worker_id, rpc_url, rpc_secret, matched_gpu) = {
+    let (job_id, worker_id, rpc_url, rpc_secret, rpc_session, matched_gpu) = {
         let mut conn = state
             .db
             .lock()
@@ -806,16 +851,17 @@ fn submit_job_inner(
         let mut stmt = tx
             .prepare(
                 "SELECT worker_id, rpc_url, rpc_secret_hex, cpu_total - cpu_reserved, ram_total - ram_reserved,
-                        vram_total - vram_reserved, gpus_json, capabilities_json, last_heartbeat_ms
-                 FROM fleet_workers WHERE status='active' ORDER BY (vram_total - vram_reserved) DESC, worker_id ASC",
+                        vram_total - vram_reserved, gpus_json, capabilities_json, last_heartbeat_ms, rpc_session
+                 FROM fleet_workers WHERE status='active' AND rpc_session IS NOT NULL
+                 ORDER BY (vram_total - vram_reserved) DESC, worker_id ASC",
             )
             .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched query".into()))?;
 
-        let candidates: Vec<(String, String, String, i64, i64, i64, String, String, i64)> = stmt
+        let candidates: Vec<(String, String, String, i64, i64, i64, String, String, i64, String)> = stmt
             .query_map([], |r| {
                 Ok((
                     r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
+                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
                 ))
             })
             .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched map".into()))?
@@ -824,8 +870,12 @@ fn submit_job_inner(
         drop(stmt);
 
         let mut chosen = None;
-        for (wid, url, secret, f_cpu, f_ram, f_vram, gpus_s, caps_s, hb) in candidates {
-            if now.saturating_sub(hb as u64) > HEARTBEAT_TTL_MS {
+        for (wid, url, secret, f_cpu, f_ram, f_vram, gpus_s, caps_s, hb, session) in candidates {
+            // Existing enrollments are also checked before any reservation or RPC.
+            let Some(url) = fleet_base_url(&url) else {
+                continue;
+            };
+            if !is_random_id(&session) || now.saturating_sub(hb as u64) > HEARTBEAT_TTL_MS {
                 continue;
             }
             if (f_cpu as u64) < req.cpu_millicores
@@ -853,12 +903,12 @@ fn submit_job_inner(
                     .clone()
                     .or_else(|| cap_entry.gpu_uuid.clone())
                     .or_else(|| gpus.first().map(|g| g.uuid.clone()));
-                chosen = Some((wid, url, secret, gpu_sel));
+                chosen = Some((wid, url, secret, session, gpu_sel));
                 break;
             }
         }
 
-        let Some((wid, url, secret, gpu_sel)) = chosen else {
+        let Some((wid, url, secret, session, gpu_sel)) = chosen else {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "capability_unavailable",
@@ -866,10 +916,10 @@ fn submit_job_inner(
             ));
         };
 
-        let mut jid_bytes = [0u8; 16];
-        let _ = fs::File::open("/dev/urandom")
-            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut jid_bytes));
-        let jid = format!("fjob_{}", hex::encode(jid_bytes));
+        let nonce = random_id().map_err(|_| {
+            (StatusCode::SERVICE_UNAVAILABLE, "entropy_unavailable", "job identity unavailable".into())
+        })?;
+        let jid = format!("fjob_{nonce}");
 
         tx.execute(
             "UPDATE fleet_workers SET cpu_reserved=cpu_reserved+?1, ram_reserved=ram_reserved+?2, vram_reserved=vram_reserved+?3 WHERE worker_id=?4",
@@ -886,12 +936,14 @@ fn submit_job_inner(
 
         tx.commit()
             .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx commit".into()))?;
-        (jid, wid, url, secret, gpu_sel)
+        (jid, wid, url, secret, session, gpu_sel)
     };
 
     // Step 2: Dispatch signed RPC to matched worker
     let rpc_payload = serde_json::to_vec(&json!({
         "job_id": job_id,
+        "rpc_session": rpc_session,
+        "issued_at_ms": now_ms(),
         "capability": req.capability,
         "gpu_uuid": matched_gpu,
         "input": req.input,
@@ -902,7 +954,7 @@ fn submit_job_inner(
 
     let worker_res = state
         .http
-        .post(format!("{}/v1/fleet-worker/run", rpc_url.trim_end_matches('/')))
+        .post(fleet_endpoint(&rpc_url, "/v1/fleet-worker/run"))
         .header("content-type", "application/json")
         .header("x-diffuser-signature", sig)
         .body(rpc_payload)
@@ -1348,11 +1400,42 @@ fn detect_local_gpus() -> Vec<GpuInfo> {
 struct WorkerRuntime {
     cfg: FleetWorkerConfig,
     http: reqwest::blocking::Client,
+    rpc_session: String,
+    replay: Mutex<ReplayWindow>,
+    clock: fn() -> u64,
+}
+
+#[derive(Default)]
+struct ReplayWindow {
+    latest_ms: u64,
+    seen: HashMap<String, u64>,
+}
+
+impl ReplayWindow {
+    fn consume(&mut self, job_id: &str, issued_at_ms: u64, now: u64) -> Result<(), &'static str> {
+        // A clock rollback must never make an evicted nonce valid again.
+        let oldest = self.latest_ms.max(now).saturating_sub(RPC_MAX_AGE_MS);
+        if now == 0 || issued_at_ms < oldest || issued_at_ms > now.saturating_add(RPC_FUTURE_SKEW_MS) {
+            return Err("rpc_timestamp_invalid");
+        }
+        self.latest_ms = self.latest_ms.max(now);
+        self.seen.retain(|_, issued| *issued >= oldest);
+        if self.seen.contains_key(job_id) {
+            return Err("rpc_replayed");
+        }
+        if self.seen.len() >= MAX_RPC_NONCES {
+            return Err("rpc_replay_cache_full");
+        }
+        self.seen.insert(job_id.to_owned(), issued_at_ms);
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
 struct WorkerRunRequest {
     job_id: String,
+    rpc_session: String,
+    issued_at_ms: u64,
     capability: String,
     #[serde(default)]
     gpu_uuid: Option<String>,
@@ -1381,6 +1464,19 @@ async fn handle_worker_run(
         Ok(v) => v,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "invalid_json", "cleanup_ok": true}))).into_response(),
     };
+    if req.rpc_session != rt.rpc_session || !req.job_id.strip_prefix("fjob_").is_some_and(is_random_id) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false, "error": "rpc_identity_invalid", "cleanup_ok": true}))).into_response();
+    }
+    let accepted = rt.replay.lock().map_err(|_| "rpc_replay_cache_unavailable")
+        .and_then(|mut replay| replay.consume(&req.job_id, req.issued_at_ms, (rt.clock)()));
+    if let Err(error) = accepted {
+        let status = match error {
+            "rpc_replayed" => StatusCode::CONFLICT,
+            "rpc_timestamp_invalid" => StatusCode::UNAUTHORIZED,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        return (status, Json(json!({"ok": false, "error": error, "cleanup_ok": true}))).into_response();
+    }
     let rt_clone = rt.clone();
     let res = tokio::task::spawn_blocking(move || execute_profile(&rt_clone, &req)).await;
     match res {
@@ -1525,6 +1621,10 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
     let raw = fs::read_to_string(cfg_path).map_err(|e| format!("read:{e}"))?;
     let cfg: FleetWorkerConfig = serde_json::from_str(&raw).map_err(|e| format!("parse:{e}"))?;
     let bind_addr: SocketAddr = cfg.bind.parse().map_err(|e| format!("bind:{e}"))?;
+    let advertise_url = fleet_base_url(&cfg.advertise_url).ok_or("invalid_advertise_url")?;
+    let controller_url = fleet_base_url(&cfg.controller_url).ok_or("invalid_controller_url")?;
+    // A fresh session on every start invalidates requests from before a crash.
+    let rpc_session = random_id().map_err(|_| "rpc_session_entropy_unavailable")?;
 
     let gpus = if cfg.auto_detect_gpus {
         detect_local_gpus()
@@ -1551,28 +1651,21 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
         })
         .collect();
 
-    let http = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
+    let http = private_http_client()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("http:{e}"))?;
 
     // Enroll + background heartbeat thread
-    let enroll_url = format!(
-        "{}/v1/fleet/workers/enroll",
-        cfg.controller_url.trim_end_matches('/')
-    );
-    let hb_url = format!(
-        "{}/v1/fleet/workers/{}/heartbeat",
-        cfg.controller_url.trim_end_matches('/'),
-        cfg.worker_id
-    );
+    let enroll_url = fleet_endpoint(&controller_url, "/v1/fleet/workers/enroll");
+    let mut hb_url = fleet_endpoint(&controller_url, "/v1/fleet/workers");
+    hb_url.path_segments_mut().unwrap().push(&cfg.worker_id).push("heartbeat");
     let enroll_body = json!({
         "worker_id": cfg.worker_id,
         "host": cfg.host,
-        "rpc_url": cfg.advertise_url,
+        "rpc_url": advertise_url.as_str(),
         "rpc_secret_hex": cfg.rpc_secret_hex,
+        "rpc_session": rpc_session,
         "cpu_millicores": cfg.cpu_millicores,
         "ram_bytes": cfg.ram_bytes,
         "vram_bytes": vram_total,
@@ -1583,21 +1676,27 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
     let hb_http = http.clone();
     std::thread::spawn(move || loop {
         let _ = hb_http
-            .post(&enroll_url)
+            .post(enroll_url.clone())
             .header("authorization", format!("Bearer {bearer}"))
             .json(&enroll_body)
             .send();
         for _ in 0..6 {
             std::thread::sleep(Duration::from_secs(10));
             let _ = hb_http
-                .post(&hb_url)
+                .post(hb_url.clone())
                 .header("authorization", format!("Bearer {bearer}"))
                 .json(&json!({}))
                 .send();
         }
     });
 
-    let runtime = Arc::new(WorkerRuntime { cfg, http });
+    let runtime = Arc::new(WorkerRuntime {
+        cfg,
+        http,
+        rpc_session,
+        replay: Mutex::default(),
+        clock: now_ms,
+    });
     let app = Router::new()
         .route("/v1/fleet-worker/run", post(handle_worker_run))
         .with_state(runtime);
@@ -1612,4 +1711,247 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
             .await
             .map_err(|e| format!("serve:{e}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const SESSION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn worker(clock: fn() -> u64) -> Arc<WorkerRuntime> {
+        let cfg = serde_json::from_value(json!({
+            "worker_id": "worker", "host": "fixture", "bind": "127.0.0.1:0",
+            "advertise_url": "http://127.0.0.1", "controller_url": "http://127.0.0.1",
+            "enroll_bearer": "fixture", "rpc_secret_hex": SECRET, "auto_detect_gpus": false,
+            "profiles": [{"capability":"fixture","adapter":{"kind":"exec","command":["/bin/cat"]}}]
+        }))
+        .unwrap();
+        Arc::new(WorkerRuntime {
+            cfg,
+            http: private_http_client()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            rpc_session: SESSION.into(),
+            replay: Mutex::default(),
+            clock,
+        })
+    }
+
+    fn signed_request(payload: &Value) -> (HeaderMap, Bytes) {
+        let body = serde_json::to_vec(payload).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-diffuser-signature",
+            sign_rpc(SECRET, &body).parse().unwrap(),
+        );
+        (headers, body.into())
+    }
+
+    #[test]
+    fn worker_accepts_only_one_fresh_request_for_its_session() {
+        const NOW: u64 = 120_000;
+        let worker = worker(|| NOW);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut payload = json!({
+                "job_id": "fjob_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "rpc_session": SESSION, "issued_at_ms": NOW, "capability": "fixture",
+                "input": {"echo": "fixture"}
+            });
+
+            let (headers, _) = signed_request(&payload);
+            payload["issued_at_ms"] = json!(NOW + 1);
+            let (_, changed) = signed_request(&payload);
+            assert_eq!(
+                handle_worker_run(State(worker.clone()), headers, changed)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+
+            for (session, timestamp) in [
+                (SESSION, NOW - RPC_MAX_AGE_MS - 1),
+                (SESSION, NOW + RPC_FUTURE_SKEW_MS + 1),
+                ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", NOW),
+            ] {
+                payload["rpc_session"] = json!(session);
+                payload["issued_at_ms"] = json!(timestamp);
+                let (headers, body) = signed_request(&payload);
+                assert_eq!(
+                    handle_worker_run(State(worker.clone()), headers, body)
+                        .await
+                        .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
+            assert!(worker.replay.lock().unwrap().seen.is_empty());
+
+            payload["rpc_session"] = json!(SESSION);
+            payload["issued_at_ms"] = json!(NOW);
+            let (headers, body) = signed_request(&payload);
+            let (first, second) = tokio::join!(
+                handle_worker_run(State(worker.clone()), headers.clone(), body.clone()),
+                handle_worker_run(State(worker.clone()), headers, body),
+            );
+            let (accepted, denied) = if first.status() == StatusCode::OK {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            assert_eq!(accepted.status(), StatusCode::OK);
+            assert_eq!(denied.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(accepted.into_body(), 1024)
+                .await
+                .unwrap();
+            let reply: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(reply["output"], payload["input"]);
+
+            payload["job_id"] = json!("fjob_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            let (headers, body) = signed_request(&payload);
+            assert_eq!(
+                handle_worker_run(State(worker.clone()), headers, body)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+        });
+    }
+
+    #[test]
+    fn nonce_window_fails_closed_at_capacity_and_after_clock_rollback() {
+        const NOW: u64 = 120_000;
+        let mut window = ReplayWindow::default();
+        for job in 0..MAX_RPC_NONCES {
+            assert_eq!(window.consume(&job.to_string(), NOW, NOW), Ok(()));
+        }
+        let expiry = NOW + RPC_MAX_AGE_MS;
+        assert_eq!(window.consume("0", NOW, expiry), Err("rpc_replayed"));
+        assert_eq!(
+            window.consume("next", expiry, expiry),
+            Err("rpc_replay_cache_full")
+        );
+        assert_eq!(window.consume("next", expiry + 1, expiry + 1), Ok(()));
+        assert_eq!(window.consume("0", NOW, NOW), Err("rpc_timestamp_invalid"));
+    }
+
+    #[test]
+    fn enrollment_and_dispatch_enforce_url_policy_and_rpc_session() {
+        let root = std::env::temp_dir().join(format!("fleet-rpc-{}", std::process::id()));
+        crate::private_state::fixture_dir(&root);
+        let config = root.join("controller.json");
+        fs::write(
+            &config,
+            json!({"admin_token_sha256":sha256_hex(b"fixture")}).to_string(),
+        )
+        .unwrap();
+        let state = FleetState::open(&config, &root).unwrap();
+        let worker = worker(now_ms);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (address, server) = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/fleet-worker/run", post(handle_worker_run))
+                .with_state(worker.clone());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (address, server)
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer fixture".parse().unwrap());
+        let mut enroll = json!({
+            "worker_id": "worker", "host": "fixture", "rpc_secret_hex": SECRET, "rpc_session": SESSION,
+            "cpu_millicores": 1000, "ram_bytes": 500000000, "vram_bytes": 0,
+            "capabilities": [{"capability": "fixture", "kind": "exec"}]
+        });
+        for (url, expected) in [
+            ("http://worker.example", StatusCode::UNPROCESSABLE_ENTITY),
+            ("https://worker.example", StatusCode::OK),
+            (&format!("http://{address}"), StatusCode::OK),
+        ] {
+            enroll["rpc_url"] = json!(url);
+            let request = serde_json::from_value(enroll.clone()).unwrap();
+            assert_eq!(
+                runtime
+                    .block_on(handle_enroll(
+                        State(state.clone()),
+                        headers.clone(),
+                        Json(request)
+                    ))
+                    .status(),
+                expected
+            );
+        }
+        let auth = state.authenticate(&headers).unwrap();
+        let request =
+            serde_json::from_value(json!({"capability":"fixture","input":{"echo":"test"}}))
+                .unwrap();
+
+        for (url, session) in [
+            ("http://worker.example".to_owned(), Some(SESSION)),
+            (format!("http://{address}"), None),
+        ] {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "UPDATE fleet_workers SET rpc_url=?1, rpc_session=?2",
+                params![url, session],
+            )
+            .unwrap();
+            drop(db);
+            assert_eq!(
+                submit_job_inner(&state, &auth, "fixture", &request)
+                    .unwrap_err()
+                    .1,
+                "capability_unavailable"
+            );
+        }
+        let db = state.db.lock().unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM fleet_jobs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        db.execute("UPDATE fleet_workers SET rpc_session=?1", [SESSION])
+            .unwrap();
+        drop(db);
+        let (_, reply) = submit_job_inner(&state, &auth, "fixture", &request).unwrap();
+        assert_eq!(reply["state"], "succeeded");
+        assert_eq!(reply["output"], request.input);
+        assert_eq!(reply["capacity_released"], true);
+        assert_eq!(
+            submit_job_inner(&state, &auth, "fixture", &request)
+                .unwrap()
+                .1["idempotent_replay"],
+            true
+        );
+
+        server.abort();
+        drop(runtime);
+        drop(worker);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rpc_session_migration_preserves_existing_records_and_is_idempotent() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE fleet_workers(worker_id TEXT); INSERT INTO fleet_workers VALUES ('old');",
+        )
+        .unwrap();
+        add_rpc_session_column(&mut db).unwrap();
+        add_rpc_session_column(&mut db).unwrap();
+        let old: Option<String> = db
+            .query_row(
+                "SELECT rpc_session FROM fleet_workers WHERE worker_id='old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, None);
+    }
 }

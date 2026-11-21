@@ -15,7 +15,7 @@ pub fn db(path: &Path) -> Result<rusqlite::Connection> {
     Ok(d)
 }
 pub fn client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    lane_router::transport::private_http_client()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|_| Failure(75, "http_unavailable"))

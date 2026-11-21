@@ -1,3 +1,4 @@
+use crate::private_state::PrivateDir;
 use serde_json::Value;
 use std::{collections::HashMap, io, path::Path};
 
@@ -202,11 +203,15 @@ impl Watchdog {
         let Some(root) = cfg["directory"].as_str().map(std::path::PathBuf::from) else {
             return;
         };
+        let Ok(inputs) = PrivateDir::open(&root) else {
+            self.idle.cards.clear();
+            return;
+        };
         let state_dir = app.compat["card_state_dir"]
             .as_str()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| root.clone());
-        let snapshot = super::card_state::refresh(&state_dir, now, |p| std::fs::read(p));
+        let snapshot = super::card_state::refresh(&state_dir, now);
         *app.cards.lock().unwrap() = snapshot.clone();
         let (busy, queued_cards) = {
             let table = app.st.lock().unwrap();
@@ -278,8 +283,8 @@ impl Watchdog {
             if timeout_action(Timeout::Idle, elapsed, limit).0 == "wait" || off {
                 continue;
             }
-            let backlog_path = root.join("backlog.json");
-            let mut backlog: Value = match std::fs::read(&backlog_path) {
+            // The private spool is the scheduler's submission authority.
+            let mut backlog: Value = match inputs.read(Path::new("backlog.json")) {
                 Ok(bytes) => match serde_json::from_slice(&bytes) {
                     Ok(v) => v,
                     Err(_) => {
@@ -324,7 +329,10 @@ impl Watchdog {
                 );
                 continue;
             }
-            let standing = match std::fs::read_to_string(root.join("standing.tsv")) {
+            let standing = match inputs.read(Path::new("standing.tsv")).and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+            }) {
                 Ok(rows) => rows,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
                 Err(_) => {
@@ -393,7 +401,7 @@ impl Watchdog {
                 self.alert(&root, now, card, &message);
                 continue;
             }
-            let bytes = match std::fs::read(&found.spec) {
+            let bytes = match inputs.read(Path::new(&found.spec)) {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     self.event(
@@ -433,9 +441,8 @@ impl Watchdog {
             if let Some(index) = found.backlog_index {
                 backlog["jobs"][index]["status"] = serde_json::json!("dispatched");
                 backlog["jobs"][index]["dispatched_at"] = serde_json::json!(ts);
-                let tmp = root.join("backlog.json.tmp");
-                if std::fs::write(&tmp, serde_json::to_vec_pretty(&backlog).unwrap())
-                    .and_then(|_| std::fs::rename(&tmp, &backlog_path))
+                if inputs
+                    .replace("backlog.json", &serde_json::to_vec_pretty(&backlog).unwrap())
                     .is_err()
                 {
                     self.dispatched.insert(found.job.clone());
@@ -532,9 +539,12 @@ pub(crate) async fn run(app: super::App) {
         .clamp(1, 120);
     let mut watchdog = Watchdog::default();
     loop {
-        let now = app.compat["watchdog"]["clock_file"]
+        let cfg = &app.compat["watchdog"];
+        let now = cfg["clock_file"]
             .as_str()
-            .and_then(|p| std::fs::read_to_string(p).ok())
+            .zip(cfg["directory"].as_str())
+            .and_then(|(clock, root)| PrivateDir::open(Path::new(root)).ok()?.read(Path::new(clock)).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or_else(|| (app.clock)());
         watchdog.tick(&app, now).await;
@@ -545,6 +555,7 @@ pub(crate) async fn run(app: super::App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::private_state::{fixture_dir, fixture_file};
     use serde_json::json;
 
     struct Fixture {
@@ -560,10 +571,14 @@ mod tests {
                 std::thread::current().id()
             ));
             let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(root.join("cards")).unwrap();
-            std::fs::write(root.join("spec.json"), b"{}").unwrap();
+            fixture_dir(&root);
+            fixture_dir(&root.join("cards"));
+            fixture_file(&root.join("spec.json"), b"{}");
             if with_job {
-                std::fs::write(root.join("backlog.json"), serde_json::to_vec(&json!({"jobs":[{"job":"job-1","card":"echo-3060","path":"render-blender","status":"ready","args":[root.join("spec.json")]}]})).unwrap()).unwrap();
+                fixture_file(
+                    &root.join("backlog.json"),
+                    json!({"jobs":[{"job":"job-1","card":"echo-3060","path":"render-blender","status":"ready","args":[root.join("spec.json")]}]}).to_string(),
+                );
             }
             let app = super::super::new_app(
                 json!({"card_state_dir":root,"watchdog":{"directory":root}}),
@@ -588,11 +603,7 @@ mod tests {
             .unwrap();
             v["epoch"] = json!(now);
             v["self_probe"]["epoch"] = json!(now);
-            std::fs::write(
-                self.root.join("cards/echo-3060.json"),
-                serde_json::to_vec(&v).unwrap(),
-            )
-            .unwrap();
+            fixture_file(&self.root.join("cards/echo-3060.json"), v.to_string());
         }
         async fn tick(&self, w: &mut Watchdog, now: u64) {
             self.state(now);
@@ -612,6 +623,81 @@ mod tests {
         }
     }
     use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn scheduler_requires_private_backlog_standing_and_in_tree_specs() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        for (case, allowed) in [
+            ("absolute", true),
+            ("relative", true),
+            ("standing", true),
+            ("root_mode", false),
+            ("backlog_mode", false),
+            ("standing_mode", false),
+            ("spec_mode", false),
+            ("outside", false),
+            ("traversal", false),
+            ("symlink", false),
+        ] {
+            let mut f = Fixture::new(false);
+            f.app.compat["watchdog"]["idle_seconds"] = json!(0);
+            let spool = f.root.join("spool");
+            fixture_dir(&spool);
+            f.app.compat["watchdog"]["directory"] = json!(spool);
+            fixture_file(&spool.join("spec.json"), "{}");
+            let spec = match case {
+                "absolute" => spool.join("spec.json"),
+                "outside" => f.root.join("spec.json"),
+                "traversal" => spool.join("../spec.json"),
+                "symlink" => {
+                    symlink(f.root.join("spec.json"), spool.join("link.json")).unwrap();
+                    spool.join("link.json")
+                }
+                _ => "spec.json".into(),
+            };
+            if matches!(case, "standing" | "standing_mode") {
+                fixture_file(
+                    &spool.join("standing.tsv"),
+                    format!("echo-3060\trender-blender\tjob-1\t{}\n", spec.display()),
+                );
+            } else {
+                fixture_file(
+                    &spool.join("backlog.json"),
+                    json!({"jobs":[{"job":"job-1","card":"echo-3060","lane":"render-blender","status":"ready","args":[spec]}]}).to_string(),
+                );
+            }
+            let permissive = match case {
+                "root_mode" => Some((spool.clone(), 0o770)),
+                "backlog_mode" => Some((spool.join("backlog.json"), 0o660)),
+                "standing_mode" => Some((spool.join("standing.tsv"), 0o660)),
+                "spec_mode" => Some((spool.join("spec.json"), 0o640)),
+                _ => None,
+            };
+            if let Some((path, mode)) = permissive {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            f.state(1000);
+            Watchdog::default()
+                .tick_with(&f.app, 1000, vec![f.worker.clone()], None, |_, lane, body| {
+                    assert_eq!(lane, "render-blender");
+                    assert_eq!(&body[..], b"{}");
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    async { axum::http::StatusCode::CREATED.into_response() }
+                })
+                .await;
+            assert_eq!(calls.into_inner(), usize::from(allowed), "{case}");
+            if matches!(case, "absolute" | "relative") {
+                let backlog = PrivateDir::open(&spool)
+                    .unwrap()
+                    .read(Path::new("backlog.json"))
+                    .unwrap();
+                let backlog: Value = serde_json::from_slice(&backlog).unwrap();
+                assert_eq!(backlog["jobs"][0]["status"], "dispatched");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn idle_9_9_min_no_fill() {
@@ -940,25 +1026,19 @@ mod tests {
             let mut f = Fixture::new(false);
             f.worker.id = "warp-2070".into();
             f.app.compat["watchdog"]["idle_seconds"] = json!(limit);
-            std::fs::write(
-                f.root.join("backlog.json"),
-                serde_json::to_vec(&json!({"jobs":[{
+            fixture_file(
+                &f.root.join("backlog.json"),
+                json!({"jobs":[{
                     "job":"job-1", "card":"warp-2070", "lane":"render-blender",
                     "status":"ready", "args":[f.root.join("spec.json")]
-                }]}))
-                .unwrap(),
-            )
-            .unwrap();
+                }]}).to_string(),
+            );
             let mut state: Value = serde_json::from_slice(include_bytes!(
                 "../tests/fixtures/card-state/warp-2070.json"
             ))
             .unwrap();
             state["epoch"] = json!(now);
-            std::fs::write(
-                f.root.join("cards/warp-2070.json"),
-                serde_json::to_vec(&state).unwrap(),
-            )
-            .unwrap();
+            fixture_file(&f.root.join("cards/warp-2070.json"), state.to_string());
             let probe = json!({"epoch":now, "util":state["util"], "watts":state["watts"]});
             let mut w = Watchdog::default();
             w.idle.cards.insert(

@@ -207,7 +207,8 @@ async fn exercise(coverage: &mut Coverage, path: &str, method: &str, status: u16
                 body = json!({});
             }
             if status == 409 {
-                fs::create_dir_all(f.root.join("cards")).unwrap();
+                crate::private_state::fixture_dir(&f.root);
+                crate::private_state::fixture_dir(&f.root.join("cards"));
                 fs::write(f.root.join("floor"), "5").unwrap();
                 fs::write(
                     f.root.join("workers.cfg"),
@@ -223,11 +224,10 @@ async fn exercise(coverage: &mut Coverage, path: &str, method: &str, status: u16
                 card["seat"] = json!({"held":false,"by":""});
                 card["session"]["state"] = json!("none");
                 card["cu"]["balance"] = json!(9.0);
-                fs::write(
-                    f.root.join("cards/colab-l4-state.json"),
-                    serde_json::to_vec(&card).unwrap(),
-                )
-                .unwrap();
+                crate::private_state::fixture_file(
+                    &f.root.join("cards/colab-l4-state.json"),
+                    card.to_string(),
+                );
                 body["report"] = json!({"job_id":"job-123","lease_id":"lease-123","segment":0,"exit_code":0,"done_items":[]});
             }
         }
