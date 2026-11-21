@@ -35,6 +35,17 @@ const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const RPC_MAX_AGE_MS: u64 = 60_000;
 const RPC_FUTURE_SKEW_MS: u64 = 5_000;
 const MAX_RPC_NONCES: usize = 8192;
+/// Six hours, matching the colab-train wall.
+const MAX_JOB_TIMEOUT_SECS: u64 = 21_600;
+/// Extra controller wait so a worker can return its cleanup result.
+const RPC_CLEANUP_BUFFER_SECS: u64 = 60;
+/// Caller-supplied CPU below this floor is still charged, so a zero request cannot schedule for free.
+const MIN_JOB_CPU_MILLICORES: u64 = 100;
+/// Caller-supplied RAM below this floor is still charged, so a zero request cannot schedule for free.
+const MIN_JOB_RAM_BYTES: u64 = 64 * 1024 * 1024;
+/// Running jobs allowed for one actor and project. Enforced inside the reservation transaction.
+const MAX_INFLIGHT_PER_ACTOR_PROJECT: i64 = 16;
+const FINISH_ATTEMPTS: u32 = 3;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct GpuInfo {
@@ -51,6 +62,9 @@ pub(super) struct CapabilityInfo {
     pub(super) gpu_uuid: Option<String>,
     #[serde(default)]
     pub(super) description: String,
+    /// Profile execution budget advertised by the worker. Omitted values stay at 60 seconds.
+    #[serde(default = "default_timeout_secs")]
+    pub(super) timeout_secs: u64,
 }
 
 #[derive(Clone, Deserialize)]
@@ -113,6 +127,29 @@ pub(super) struct FleetWorkerConfig {
 
 fn default_timeout_secs() -> u64 {
     60
+}
+
+fn bounded_timeout_secs(secs: u64) -> u64 {
+    secs.clamp(1, MAX_JOB_TIMEOUT_SECS)
+}
+
+/// Controller HTTP deadline for one worker RPC.
+/// The matched profile budget is the floor. A longer caller budget is covered too.
+/// Both sit well above the old fixed 120 second client ceiling.
+fn rpc_http_timeout(profile_timeout_secs: u64) -> Duration {
+    Duration::from_secs(
+        bounded_timeout_secs(profile_timeout_secs).saturating_add(RPC_CLEANUP_BUFFER_SECS),
+    )
+}
+
+/// Worker subprocess and upstream HTTP budget.
+/// An omitted caller budget uses the configured profile timeout.
+fn effective_exec_timeout_secs(requested: Option<u64>, profile: u64) -> u64 {
+    let profile = bounded_timeout_secs(profile);
+    match requested {
+        Some(secs) => bounded_timeout_secs(secs).min(profile),
+        None => profile,
+    }
 }
 fn default_http_method() -> String {
     "POST".to_string()
@@ -181,6 +218,22 @@ fn add_rpc_session_column(conn: &mut Connection) -> rusqlite::Result<()> {
     )?;
     if !exists {
         tx.execute("ALTER TABLE fleet_workers ADD COLUMN rpc_session TEXT", [])?;
+    }
+    tx.commit()
+}
+
+fn add_capacity_released_column(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fleet_jobs') WHERE name='capacity_released')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute(
+            "ALTER TABLE fleet_jobs ADD COLUMN capacity_released INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     tx.commit()
 }
@@ -282,6 +335,7 @@ impl FleetState {
                  output_json TEXT,
                  output_sha256 TEXT,
                  error_code TEXT,
+                 capacity_released INTEGER NOT NULL DEFAULT 0,
                  created_at_ms INTEGER NOT NULL,
                  updated_at_ms INTEGER NOT NULL,
                  UNIQUE(actor, project, idempotency_key)
@@ -298,9 +352,10 @@ impl FleetState {
         )
         .map_err(|e| format!("fleet_schema:{e}"))?;
         add_rpc_session_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
+        add_capacity_released_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
 
         let http = private_http_client()
-            .timeout(Duration::from_secs(120))
+            .timeout(rpc_http_timeout(MAX_JOB_TIMEOUT_SECS))
             .build()
             .map_err(|e| format!("fleet_http:{e}"))?;
 
@@ -645,6 +700,7 @@ fn discover_json(state: &FleetState, auth: &CallerAuth) -> Result<Value, &'stati
                     "kind": c["kind"],
                     "description": c["description"],
                     "gpu_uuid": c["gpu_uuid"],
+                    "timeout_secs": c["timeout_secs"].as_u64().map(bounded_timeout_secs).unwrap_or_else(default_timeout_secs),
                     "accepting": true,
                     "free_cpu_millicores": w["cpu_free"],
                     "free_ram_bytes": w["ram_free"],
@@ -763,7 +819,7 @@ async fn handle_revoke_token(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct SubmitJobRequest {
     capability: String,
     #[serde(default)]
@@ -776,8 +832,12 @@ struct SubmitJobRequest {
     cpu_millicores: u64,
     #[serde(default = "default_job_ram")]
     ram_bytes: u64,
-    #[serde(default = "default_timeout_secs")]
-    timeout_secs: u64,
+    /// Omitted caller budgets use the matched worker profile timeout.
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    /// Return after the job is reserved. The worker RPC continues in the background.
+    #[serde(default, rename = "async")]
+    run_async: bool,
 }
 fn default_job_cpu() -> u64 {
     500
@@ -786,12 +846,163 @@ fn default_job_ram() -> u64 {
     256 * 1024 * 1024
 }
 
+#[cfg(test)]
 fn submit_job_inner(
     state: &FleetState,
     auth: &CallerAuth,
     idemp_key: &str,
     req: &SubmitJobRequest,
 ) -> Result<(StatusCode, Value), (StatusCode, &'static str, String)> {
+    match prepare_job(state, auth, idemp_key, req)? {
+        PrepareOutcome::Replay(value) => Ok((StatusCode::OK, value)),
+        PrepareOutcome::Fresh(job) => {
+            if req.run_async {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "async_runtime_required",
+                    "async jobs are started by the fleet HTTP or MCP handler".into(),
+                ));
+            }
+            let outcome = dispatch_worker(state, &job, req);
+            let body = completed_reply(req, &job, &outcome, false);
+            let _ = finish_job(state, &job, &outcome, false);
+            Ok((StatusCode::OK, body))
+        }
+    }
+}
+
+async fn submit_job(
+    state: FleetState,
+    auth: CallerAuth,
+    idemp_key: String,
+    req: SubmitJobRequest,
+) -> Result<(StatusCode, Value), (StatusCode, &'static str, String)> {
+    let state_prep = state.clone();
+    let auth_prep = auth.clone();
+    let req_prep = req.clone();
+    let idemp_prep = idemp_key.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_job(&state_prep, &auth_prep, &idemp_prep, &req_prep)
+    })
+    .await
+    .map_err(|_| dispatch_panic_error())??;
+    match prepared {
+        PrepareOutcome::Replay(value) => Ok((StatusCode::OK, value)),
+        PrepareOutcome::Fresh(job) => {
+            // Sync and async both finalize on a detached task. The handler awaits
+            // a oneshot only for synchronous jobs, so a dropped client cannot skip finish_job.
+            let always_release = req.run_async;
+            let rx = spawn_dispatch(state, job.clone(), req.clone(), always_release);
+            if req.run_async {
+                Ok((StatusCode::OK, running_reply(&req, &job)))
+            } else {
+                match rx.await {
+                    Ok(result) => result,
+                    Err(_) => Err(dispatch_panic_error()),
+                }
+            }
+        }
+    }
+}
+
+fn dispatch_panic_error() -> (StatusCode, &'static str, String) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "worker_dispatch_panicked",
+        "internal dispatch error".to_string(),
+    )
+}
+
+enum PrepareOutcome {
+    Replay(Value),
+    Fresh(FreshJob),
+}
+
+#[derive(Clone)]
+struct FreshJob {
+    job_id: String,
+    worker_id: String,
+    rpc_url: Url,
+    rpc_secret: String,
+    rpc_session: String,
+    matched_gpu: Option<String>,
+    profile_timeout_secs: u64,
+    cpu_millicores: u64,
+    ram_bytes: u64,
+    min_vram_bytes: u64,
+}
+
+struct WorkerOutcome {
+    state: &'static str,
+    output: Value,
+    output_sha256: Option<String>,
+    error_code: Option<String>,
+    cleanup_ok: bool,
+}
+
+fn panicked_outcome() -> WorkerOutcome {
+    WorkerOutcome {
+        state: "failed",
+        output: Value::Null,
+        output_sha256: None,
+        error_code: Some("worker_dispatch_panicked".into()),
+        cleanup_ok: false,
+    }
+}
+
+fn persisted_state<'a>(outcome: &'a WorkerOutcome, always_release: bool) -> &'a str {
+    if outcome.state == "succeeded" {
+        "succeeded"
+    } else if always_release {
+        "failed"
+    } else {
+        outcome.state
+    }
+}
+
+fn running_reply(req: &SubmitJobRequest, job: &FreshJob) -> Value {
+    json!({
+        "schema_version": "diffuser-fleet/v1",
+        "job_id": job.job_id,
+        "state": "running",
+        "worker_id": job.worker_id,
+        "capability": req.capability,
+        "idempotent_replay": false,
+        "capacity_released": false,
+        "gpu_uuid": job.matched_gpu,
+        "output": Value::Null,
+        "output_sha256": Value::Null,
+        "error_code": Value::Null
+    })
+}
+
+fn completed_reply(
+    req: &SubmitJobRequest,
+    job: &FreshJob,
+    outcome: &WorkerOutcome,
+    always_release: bool,
+) -> Value {
+    json!({
+        "schema_version": "diffuser-fleet/v1",
+        "job_id": job.job_id,
+        "worker_id": job.worker_id,
+        "gpu_uuid": job.matched_gpu,
+        "capability": req.capability,
+        "state": persisted_state(outcome, always_release),
+        "idempotent_replay": false,
+        "capacity_released": always_release || outcome.cleanup_ok,
+        "output": outcome.output,
+        "output_sha256": outcome.output_sha256,
+        "error_code": outcome.error_code
+    })
+}
+
+fn prepare_job(
+    state: &FleetState,
+    auth: &CallerAuth,
+    idemp_key: &str,
+    req: &SubmitJobRequest,
+) -> Result<PrepareOutcome, (StatusCode, &'static str, String)> {
     if idemp_key.trim().is_empty() || req.capability.trim().is_empty() {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "missing capability or Idempotency-Key".into()));
     }
@@ -805,234 +1016,440 @@ fn submit_job_inner(
     let now = now_ms();
     let input_str = serde_json::to_string(&req.input).unwrap_or_else(|_| "{}".into());
 
-    // Step 1: Atomic idempotency check + scheduler match + reservation
-    let (job_id, worker_id, rpc_url, rpc_secret, rpc_session, matched_gpu) = {
-        let mut conn = state
-            .db
-            .lock()
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock".into()))?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx begin".into()))?;
+    let mut conn = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock".into()))?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx begin".into()))?;
 
-        // Idempotent retry lookup
-        let existing: Option<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>)> = tx
-            .query_row(
-                "SELECT job_id, worker_id, state, gpu_uuid, output_json, output_sha256, error_code
-                 FROM fleet_jobs WHERE actor=?1 AND project=?2 AND idempotency_key=?3",
-                params![auth.actor, auth.project, idemp_key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-            )
-            .optional()
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "idemp query".into()))?;
-        if let Some((jid, wid, st, gpu, out_j, out_sha, err_c)) = existing {
-            let output: Value = out_j
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(Value::Null);
-            return Ok((
-                StatusCode::OK,
-                json!({
-                    "schema_version": "diffuser-fleet/v1",
-                    "job_id": jid,
-                    "worker_id": wid,
-                    "gpu_uuid": gpu,
-                    "capability": req.capability,
-                    "state": st,
-                    "idempotent_replay": true,
-                    "output": output,
-                    "output_sha256": out_sha,
-                    "error_code": err_c
-                }),
-            ));
-        }
+    let existing: Option<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64)> = tx
+        .query_row(
+            "SELECT job_id, worker_id, state, gpu_uuid, output_json, output_sha256, error_code, capacity_released
+             FROM fleet_jobs WHERE actor=?1 AND project=?2 AND idempotency_key=?3",
+            params![auth.actor, auth.project, idemp_key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        )
+        .optional()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "idemp query".into()))?;
+    if let Some((jid, wid, st, gpu, out_j, out_sha, err_c, released)) = existing {
+        let output: Value = out_j
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        return Ok(PrepareOutcome::Replay(json!({
+            "schema_version": "diffuser-fleet/v1",
+            "job_id": jid,
+            "worker_id": wid,
+            "gpu_uuid": gpu,
+            "capability": req.capability,
+            "state": st,
+            "idempotent_replay": true,
+            "capacity_released": released != 0,
+            "output": output,
+            "output_sha256": out_sha,
+            "error_code": err_c
+        })));
+    }
 
-        // Find matching live active worker
-        let mut stmt = tx
-            .prepare(
-                "SELECT worker_id, rpc_url, rpc_secret_hex, cpu_total - cpu_reserved, ram_total - ram_reserved,
-                        vram_total - vram_reserved, gpus_json, capabilities_json, last_heartbeat_ms, rpc_session
-                 FROM fleet_workers WHERE status='active' AND rpc_session IS NOT NULL
-                 ORDER BY (vram_total - vram_reserved) DESC, worker_id ASC",
-            )
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched query".into()))?;
+    // Service-owned floors. A caller who omits resources or sends 0 still consumes capacity.
+    let cpu_millicores = req.cpu_millicores.max(MIN_JOB_CPU_MILLICORES);
+    let ram_bytes = req.ram_bytes.max(MIN_JOB_RAM_BYTES);
 
-        let candidates: Vec<(String, String, String, i64, i64, i64, String, String, i64, String)> = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
-                ))
-            })
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched map".into()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched collect".into()))?;
-        drop(stmt);
+    let mut stmt = tx
+        .prepare(
+            "SELECT worker_id, rpc_url, rpc_secret_hex, cpu_total - cpu_reserved, ram_total - ram_reserved,
+                    vram_total - vram_reserved, gpus_json, capabilities_json, last_heartbeat_ms, rpc_session
+             FROM fleet_workers WHERE status='active' AND rpc_session IS NOT NULL
+             ORDER BY (vram_total - vram_reserved) DESC, worker_id ASC",
+        )
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched query".into()))?;
 
-        let mut chosen = None;
-        for (wid, url, secret, f_cpu, f_ram, f_vram, gpus_s, caps_s, hb, session) in candidates {
-            // Existing enrollments are also checked before any reservation or RPC.
-            let Some(url) = fleet_base_url(&url) else {
-                continue;
-            };
-            if !is_random_id(&session) || now.saturating_sub(hb as u64) > HEARTBEAT_TTL_MS {
-                continue;
-            }
-            if (f_cpu as u64) < req.cpu_millicores
-                || (f_ram as u64) < req.ram_bytes
-                || (f_vram as u64) < req.min_vram_bytes
-            {
-                continue;
-            }
-            let caps: Vec<CapabilityInfo> = serde_json::from_str(&caps_s).unwrap_or_default();
-            let gpus: Vec<GpuInfo> = serde_json::from_str(&gpus_s).unwrap_or_default();
-            let matching_cap = caps.iter().find(|c| {
-                if c.capability != req.capability {
-                    return false;
-                }
-                if let Some(ref want_gpu) = req.pin_gpu_uuid {
-                    c.gpu_uuid.as_deref() == Some(want_gpu.as_str())
-                        || gpus.iter().any(|g| g.uuid == *want_gpu)
-                } else {
-                    true
-                }
-            });
-            if let Some(cap_entry) = matching_cap {
-                let gpu_sel = req
-                    .pin_gpu_uuid
-                    .clone()
-                    .or_else(|| cap_entry.gpu_uuid.clone())
-                    .or_else(|| gpus.first().map(|g| g.uuid.clone()));
-                chosen = Some((wid, url, secret, session, gpu_sel));
-                break;
-            }
-        }
+    let candidates: Vec<(String, String, String, i64, i64, i64, String, String, i64, String)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+            ))
+        })
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched map".into()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched collect".into()))?;
+    drop(stmt);
 
-        let Some((wid, url, secret, session, gpu_sel)) = chosen else {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "capability_unavailable",
-                "no live worker matches capability, resources, and GPU pin".into(),
-            ));
+    let mut chosen = None;
+    for (wid, url, secret, f_cpu, f_ram, f_vram, gpus_s, caps_s, hb, session) in candidates {
+        // Existing enrollments are also checked before any reservation or RPC.
+        let Some(url) = fleet_base_url(&url) else {
+            continue;
         };
+        if !is_random_id(&session) || now.saturating_sub(hb as u64) > HEARTBEAT_TTL_MS {
+            continue;
+        }
+        if (f_cpu as u64) < cpu_millicores
+            || (f_ram as u64) < ram_bytes
+            || (f_vram as u64) < req.min_vram_bytes
+        {
+            continue;
+        }
+        let caps: Vec<CapabilityInfo> = serde_json::from_str(&caps_s).unwrap_or_default();
+        let gpus: Vec<GpuInfo> = serde_json::from_str(&gpus_s).unwrap_or_default();
+        let matching_cap = caps.iter().find(|c| {
+            if c.capability != req.capability {
+                return false;
+            }
+            if let Some(ref want_gpu) = req.pin_gpu_uuid {
+                c.gpu_uuid.as_deref() == Some(want_gpu.as_str())
+                    || gpus.iter().any(|g| g.uuid == *want_gpu)
+            } else {
+                true
+            }
+        });
+        if let Some(cap_entry) = matching_cap {
+            let gpu_sel = req
+                .pin_gpu_uuid
+                .clone()
+                .or_else(|| cap_entry.gpu_uuid.clone())
+                .or_else(|| gpus.first().map(|g| g.uuid.clone()));
+            chosen = Some((
+                wid,
+                url,
+                secret,
+                session,
+                gpu_sel,
+                bounded_timeout_secs(cap_entry.timeout_secs),
+            ));
+            break;
+        }
+    }
 
-        let nonce = random_id().map_err(|_| {
-            (StatusCode::SERVICE_UNAVAILABLE, "entropy_unavailable", "job identity unavailable".into())
-        })?;
-        let jid = format!("fjob_{nonce}");
-
-        tx.execute(
-            "UPDATE fleet_workers SET cpu_reserved=cpu_reserved+?1, ram_reserved=ram_reserved+?2, vram_reserved=vram_reserved+?3 WHERE worker_id=?4",
-            params![req.cpu_millicores as i64, req.ram_bytes as i64, req.min_vram_bytes as i64, wid],
-        )
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "reserve failed".into()))?;
-
-        tx.execute(
-            "INSERT INTO fleet_jobs (job_id, idempotency_key, actor, project, capability, worker_id, gpu_uuid, state, input_json, created_at_ms, updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,'running',?8,?9,?9)",
-            params![jid, idemp_key, auth.actor, auth.project, req.capability, wid, gpu_sel, input_str, now as i64],
-        )
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "job insert failed".into()))?;
-
-        tx.commit()
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx commit".into()))?;
-        (jid, wid, url, secret, session, gpu_sel)
+    let Some((wid, url, secret, session, gpu_sel, profile_timeout)) = chosen else {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "capability_unavailable",
+            "no live worker matches capability, resources, and GPU pin".into(),
+        ));
     };
 
-    // Step 2: Dispatch signed RPC to matched worker
+    let inflight: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM fleet_jobs WHERE actor=?1 AND project=?2 AND state='running'",
+            params![auth.actor, auth.project],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "storage_unavailable",
+                "inflight query".into(),
+            )
+        })?;
+    if inflight >= MAX_INFLIGHT_PER_ACTOR_PROJECT {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "capacity_exhausted",
+            "in-flight job limit reached for this actor and project".into(),
+        ));
+    }
+
+    let nonce = random_id().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "entropy_unavailable", "job identity unavailable".into())
+    })?;
+    let jid = format!("fjob_{nonce}");
+
+    tx.execute(
+        "UPDATE fleet_workers SET cpu_reserved=cpu_reserved+?1, ram_reserved=ram_reserved+?2, vram_reserved=vram_reserved+?3 WHERE worker_id=?4",
+        params![cpu_millicores as i64, ram_bytes as i64, req.min_vram_bytes as i64, wid],
+    )
+    .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "reserve failed".into()))?;
+
+    tx.execute(
+        "INSERT INTO fleet_jobs (job_id, idempotency_key, actor, project, capability, worker_id, gpu_uuid, state, input_json, capacity_released, created_at_ms, updated_at_ms)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'running',?8,0,?9,?9)",
+        params![jid, idemp_key, auth.actor, auth.project, req.capability, wid, gpu_sel, input_str, now as i64],
+    )
+    .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "job insert failed".into()))?;
+
+    tx.commit()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx commit".into()))?;
+
+    Ok(PrepareOutcome::Fresh(FreshJob {
+        job_id: jid,
+        worker_id: wid,
+        rpc_url: url,
+        rpc_secret: secret,
+        rpc_session: session,
+        matched_gpu: gpu_sel,
+        profile_timeout_secs: profile_timeout,
+        cpu_millicores,
+        ram_bytes,
+        min_vram_bytes: req.min_vram_bytes,
+    }))
+}
+
+fn dispatch_worker(state: &FleetState, job: &FreshJob, req: &SubmitJobRequest) -> WorkerOutcome {
+    let profile = bounded_timeout_secs(job.profile_timeout_secs);
+    let sent = match req.timeout_secs {
+        Some(secs) => bounded_timeout_secs(secs),
+        None => profile,
+    };
+    // issued_at_ms is stamped at dispatch. The worker checks freshness when the
+    // RPC arrives, not when a long job later finishes.
     let rpc_payload = serde_json::to_vec(&json!({
-        "job_id": job_id,
-        "rpc_session": rpc_session,
+        "job_id": job.job_id,
+        "rpc_session": job.rpc_session,
         "issued_at_ms": now_ms(),
         "capability": req.capability,
-        "gpu_uuid": matched_gpu,
+        "gpu_uuid": job.matched_gpu,
         "input": req.input,
-        "timeout_secs": req.timeout_secs.clamp(1, 300)
+        "timeout_secs": sent
     }))
     .unwrap_or_default();
-    let sig = sign_rpc(&rpc_secret, &rpc_payload);
-
+    let sig = sign_rpc(&job.rpc_secret, &rpc_payload);
     let worker_res = state
         .http
-        .post(fleet_endpoint(&rpc_url, "/v1/fleet-worker/run"))
+        .post(fleet_endpoint(&job.rpc_url, "/v1/fleet-worker/run"))
+        .timeout(rpc_http_timeout(profile.max(sent)))
         .header("content-type", "application/json")
         .header("x-diffuser-signature", sig)
         .body(rpc_payload)
         .send();
+    interpret_worker(worker_res)
+}
 
-    let (final_state, output_val, output_sha, err_code, release_capacity) = match worker_res {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>() {
-                Ok(body) if body["ok"] == true => {
-                    let out = body["output"].clone();
-                    let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
-                    let sha = sha256_hex(&out_bytes);
-                    let clean = body["cleanup_ok"].as_bool().unwrap_or(false);
-                    ("succeeded", out, Some(sha), None, clean)
+fn interpret_worker(
+    worker_res: Result<reqwest::blocking::Response, reqwest::Error>,
+) -> WorkerOutcome {
+    match worker_res {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>() {
+            Ok(body) if body["ok"] == true => {
+                let out = body["output"].clone();
+                let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
+                let sha = sha256_hex(&out_bytes);
+                let clean = body["cleanup_ok"].as_bool().unwrap_or(false);
+                WorkerOutcome {
+                    state: "succeeded",
+                    output: out,
+                    output_sha256: Some(sha),
+                    error_code: None,
+                    cleanup_ok: clean,
                 }
-                Ok(body) => {
-                    let clean = body["cleanup_ok"].as_bool().unwrap_or(false);
-                    let code = body["error"].as_str().unwrap_or("worker_execution_failed").to_string();
-                    (if clean { "failed" } else { "failed_uncertain" }, Value::Null, None, Some(code), clean)
-                }
-                Err(_) => ("failed_uncertain", Value::Null, None, Some("worker_invalid_reply".into()), false),
             }
-        }
-        Ok(resp) => (
-            "failed_uncertain",
-            Value::Null,
-            None,
-            Some(format!("worker_http_{}", resp.status().as_u16())),
-            false,
-        ),
-        Err(_) => ("failed_uncertain", Value::Null, None, Some("worker_unreachable".into()), false),
-    };
+            Ok(body) => {
+                let clean = body["cleanup_ok"].as_bool().unwrap_or(false);
+                let code = body["error"]
+                    .as_str()
+                    .unwrap_or("worker_execution_failed")
+                    .to_string();
+                WorkerOutcome {
+                    state: if clean { "failed" } else { "failed_uncertain" },
+                    output: Value::Null,
+                    output_sha256: None,
+                    error_code: Some(code),
+                    cleanup_ok: clean,
+                }
+            }
+            Err(_) => WorkerOutcome {
+                state: "failed_uncertain",
+                output: Value::Null,
+                output_sha256: None,
+                error_code: Some("worker_invalid_reply".into()),
+                cleanup_ok: false,
+            },
+        },
+        Ok(resp) => WorkerOutcome {
+            state: "failed_uncertain",
+            output: Value::Null,
+            output_sha256: None,
+            error_code: Some(format!("worker_http_{}", resp.status().as_u16())),
+            cleanup_ok: false,
+        },
+        Err(_) => WorkerOutcome {
+            state: "failed_uncertain",
+            output: Value::Null,
+            output_sha256: None,
+            error_code: Some("worker_unreachable".into()),
+            cleanup_ok: false,
+        },
+    }
+}
 
-    // Step 3: Commit durable result & release capacity ONLY when cleanup_ok == true
-    let out_str = if output_val.is_null() {
+fn finish_job(
+    state: &FleetState,
+    job: &FreshJob,
+    outcome: &WorkerOutcome,
+    always_release: bool,
+) -> Result<(), String> {
+    let release = always_release || outcome.cleanup_ok;
+    let final_state = persisted_state(outcome, always_release);
+    let out_str = if outcome.output.is_null() {
         None
     } else {
-        Some(serde_json::to_string(&output_val).unwrap_or_else(|_| "null".into()))
+        Some(serde_json::to_string(&outcome.output).unwrap_or_else(|_| "null".into()))
     };
     let done_ts = now_ms() as i64;
-    if let Ok(mut conn) = state.db.lock() {
-        if let Ok(tx) = conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-            let _ = tx.execute(
-                "UPDATE fleet_jobs SET state=?1, output_json=?2, output_sha256=?3, error_code=?4, updated_at_ms=?5 WHERE job_id=?6",
-                params![final_state, out_str, output_sha, err_code, done_ts, job_id],
-            );
-            if release_capacity {
-                let _ = tx.execute(
-                    "UPDATE fleet_workers SET cpu_reserved=MAX(0, cpu_reserved-?1), ram_reserved=MAX(0, ram_reserved-?2), vram_reserved=MAX(0, vram_reserved-?3) WHERE worker_id=?4",
-                    params![req.cpu_millicores as i64, req.ram_bytes as i64, req.min_vram_bytes as i64, worker_id],
+    let mut conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(err) => {
+            let msg = format!("tx begin job_id={} err={err}", job.job_id);
+            eprintln!("fleet_finish_job: {msg}");
+            return Err(msg);
+        }
+    };
+    let updated = match tx.execute(
+        "UPDATE fleet_jobs SET state=?1, output_json=?2, output_sha256=?3, error_code=?4, capacity_released=?5, updated_at_ms=?6
+         WHERE job_id=?7 AND state='running'",
+        params![
+            final_state,
+            out_str,
+            outcome.output_sha256,
+            outcome.error_code,
+            if release { 1 } else { 0 },
+            done_ts,
+            job.job_id
+        ],
+    ) {
+        Ok(updated) => updated,
+        Err(err) => {
+            let msg = format!("job update job_id={} err={err}", job.job_id);
+            eprintln!("fleet_finish_job: {msg}");
+            return Err(msg);
+        }
+    };
+    if updated == 1 {
+        let counter = if release {
+            tx.execute(
+                "UPDATE fleet_workers SET cpu_reserved=MAX(0, cpu_reserved-?1), ram_reserved=MAX(0, ram_reserved-?2), vram_reserved=MAX(0, vram_reserved-?3) WHERE worker_id=?4",
+                params![job.cpu_millicores as i64, job.ram_bytes as i64, job.min_vram_bytes as i64, job.worker_id],
+            )
+        } else {
+            tx.execute(
+                "UPDATE fleet_workers SET status='quarantined' WHERE worker_id=?1",
+                [&job.worker_id],
+            )
+        };
+        match counter {
+            Ok(1) => {}
+            Ok(rows) => {
+                let msg = format!(
+                    "worker counter update matched {rows} rows job_id={} worker_id={}",
+                    job.job_id, job.worker_id
                 );
-            } else {
-                // Quarantine uncertain worker instead of blindly freeing dirty capacity
-                let _ = tx.execute(
-                    "UPDATE fleet_workers SET status='quarantined' WHERE worker_id=?1",
-                    [&worker_id],
-                );
+                eprintln!("fleet_finish_job: {msg}");
+                return Err(msg);
             }
-            let _ = tx.commit();
+            Err(err) => {
+                let msg = format!(
+                    "worker counter update job_id={} worker_id={} err={err}",
+                    job.job_id, job.worker_id
+                );
+                eprintln!("fleet_finish_job: {msg}");
+                return Err(msg);
+            }
+        }
+    } else if updated != 0 {
+        let msg = format!("job update matched {updated} rows job_id={}", job.job_id);
+        eprintln!("fleet_finish_job: {msg}");
+        return Err(msg);
+    }
+    if let Err(err) = tx.commit() {
+        let msg = format!("tx commit job_id={} err={err}", job.job_id);
+        eprintln!("fleet_finish_job: {msg}");
+        return Err(msg);
+    }
+    Ok(())
+}
+
+async fn finish_job_retry(
+    state: &FleetState,
+    job: &FreshJob,
+    outcome: &WorkerOutcome,
+    always_release: bool,
+) -> bool {
+    for attempt in 1..=FINISH_ATTEMPTS {
+        if finish_job(state, job, outcome, always_release).is_ok() {
+            return true;
+        }
+        if attempt < FINISH_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
+    false
+}
 
-    Ok((
-        StatusCode::OK,
-        json!({
-            "schema_version": "diffuser-fleet/v1",
-            "job_id": job_id,
-            "worker_id": worker_id,
-            "gpu_uuid": matched_gpu,
-            "capability": req.capability,
-            "state": final_state,
-            "idempotent_replay": false,
-            "capacity_released": release_capacity,
-            "output": output_val,
-            "output_sha256": output_sha,
-            "error_code": err_code
-        }),
-    ))
+struct AsyncRelease {
+    state: FleetState,
+    job: FreshJob,
+    armed: bool,
+}
+
+impl Drop for AsyncRelease {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = finish_job(&self.state, &self.job, &panicked_outcome(), true);
+        }
+    }
+}
+
+fn spawn_dispatch(
+    state: FleetState,
+    job: FreshJob,
+    req: SubmitJobRequest,
+    always_release: bool,
+) -> tokio::sync::oneshot::Receiver<Result<(StatusCode, Value), (StatusCode, &'static str, String)>>
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let _ = finish_job(&state, &job, &panicked_outcome(), true);
+        let _ = tx.send(Err(dispatch_panic_error()));
+        return rx;
+    };
+    // Dropping this JoinHandle detaches the task. It is not tied to the HTTP handler.
+    runtime.spawn(async move {
+        let mut guard = AsyncRelease {
+            state: state.clone(),
+            job: job.clone(),
+            armed: true,
+        };
+        let state_call = state.clone();
+        let job_call = job.clone();
+        let req_call = req.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            dispatch_worker(&state_call, &job_call, &req_call)
+        })
+        .await;
+        let (outcome, panicked) = match joined {
+            Ok(outcome) => (outcome, false),
+            Err(_) => (panicked_outcome(), true),
+        };
+        // A panicked worker call must not keep the reservation. The drop guard covers
+        // a panic before this attempt finishes.
+        let release = always_release || panicked;
+        if finish_job_retry(&state, &job, &outcome, release).await {
+            guard.armed = false;
+        }
+        let reply = if panicked {
+            Err(dispatch_panic_error())
+        } else if guard.armed {
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "storage_unavailable",
+                "job finalization failed".into(),
+            ))
+        } else {
+            Ok((
+                StatusCode::OK,
+                completed_reply(&req, &job, &outcome, always_release),
+            ))
+        };
+        let _ = tx.send(reply);
+    });
+    rx
 }
 
 async fn handle_submit_job(
@@ -1049,12 +1466,9 @@ async fn handle_submit_job(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let res = tokio::task::spawn_blocking(move || submit_job_inner(&state, &auth, &idemp, &req))
-        .await;
-    match res {
-        Ok(Ok((st, val))) => (st, Json(val)).into_response(),
-        Ok(Err((st, code, msg))) => err_resp(st, code, &msg),
-        Err(_) => err_resp(StatusCode::SERVICE_UNAVAILABLE, "worker_dispatch_panicked", "internal dispatch error"),
+    match submit_job(state, auth, idemp, req).await {
+        Ok((st, val)) => (st, Json(val)).into_response(),
+        Err((st, code, msg)) => err_resp(st, code, &msg),
     }
 }
 
@@ -1063,16 +1477,16 @@ fn get_job_inner(state: &FleetState, auth: &CallerAuth, job_id: &str) -> Result<
         .db
         .lock()
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"))?;
-    let row: Option<(String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>, i64, i64)> = conn
+    let row: Option<(String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>, i64, i64, i64)> = conn
         .query_row(
-            "SELECT actor, project, capability, worker_id, gpu_uuid, state, output_json, output_sha256, error_code, created_at_ms, updated_at_ms
+            "SELECT actor, project, capability, worker_id, gpu_uuid, state, output_json, output_sha256, error_code, capacity_released, created_at_ms, updated_at_ms
              FROM fleet_jobs WHERE job_id=?1",
             [job_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?)),
         )
         .optional()
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"))?;
-    let Some((actor, project, capability, worker_id, gpu_uuid, st, out_j, out_sha, err_c, c_at, u_at)) = row else {
+    let Some((actor, project, capability, worker_id, gpu_uuid, st, out_j, out_sha, err_c, released, c_at, u_at)) = row else {
         return Err((StatusCode::NOT_FOUND, "job_not_found"));
     };
     if !auth.is_admin && (actor != auth.actor || project != auth.project) {
@@ -1094,6 +1508,7 @@ fn get_job_inner(state: &FleetState, auth: &CallerAuth, job_id: &str) -> Result<
         "output": output,
         "output_sha256": out_sha,
         "error_code": err_c,
+        "capacity_released": released != 0,
         "created_at_ms": c_at,
         "updated_at_ms": u_at
     }))
@@ -1291,7 +1706,7 @@ async fn handle_mcp(
                 "tools": [
                     {"name": "fleet_discover", "description": "Discover live Diffuser capabilities and available CPU/GPU capacity.", "inputSchema": {"type": "object", "properties": {}}},
                     {"name": "fleet_list_workers", "description": "List all enrolled Diffuser workers and live resources (admin).", "inputSchema": {"type": "object", "properties": {}}},
-                    {"name": "fleet_submit_job", "description": "Submit an idempotent job by capability and optional exact GPU UUID.", "inputSchema": {"type": "object", "required": ["capability", "idempotency_key"], "properties": {"capability": {"type": "string"}, "idempotency_key": {"type": "string"}, "pin_gpu_uuid": {"type": "string"}, "input": {"type": "object"}}}},
+                    {"name": "fleet_submit_job", "description": "Submit an idempotent job by capability and optional exact GPU UUID. Set async true to return while the job is still running.", "inputSchema": {"type": "object", "required": ["capability", "idempotency_key"], "properties": {"capability": {"type": "string"}, "idempotency_key": {"type": "string"}, "pin_gpu_uuid": {"type": "string"}, "input": {"type": "object"}, "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 21600}, "async": {"type": "boolean"}}}},
                     {"name": "fleet_get_job", "description": "Read durable job status and verified output digest.", "inputSchema": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}}},
                     {"name": "fleet_issue_token", "description": "Issue a scoped caller token for a human or agent (admin).", "inputSchema": {"type": "object", "required": ["actor", "project", "allowed_capabilities"], "properties": {"actor": {"type": "string"}, "project": {"type": "string"}, "allowed_capabilities": {"type": "array", "items": {"type": "string"}}}}}
                 ]
@@ -1328,19 +1743,10 @@ async fn handle_mcp(
                 "fleet_submit_job" => {
                     let idemp = args["idempotency_key"].as_str().unwrap_or("").to_string();
                     match serde_json::from_value::<SubmitJobRequest>(args) {
-                        Ok(sub) => {
-                            let st_clone = state.clone();
-                            let auth_clone = auth.clone();
-                            match tokio::task::spawn_blocking(move || {
-                                submit_job_inner(&st_clone, &auth_clone, &idemp, &sub)
-                            })
-                            .await
-                            {
-                                Ok(Ok((_, v))) => Ok(v),
-                                Ok(Err((_, c, m))) => Err(format!("{c}: {m}")),
-                                Err(_) => Err("dispatch_failed".into()),
-                            }
-                        }
+                        Ok(sub) => match submit_job(state.clone(), auth.clone(), idemp, sub).await {
+                            Ok((_, v)) => Ok(v),
+                            Err((_, c, m)) => Err(format!("{c}: {m}")),
+                        },
                         Err(e) => Err(format!("invalid_args:{e}")),
                     }
                 }
@@ -1441,8 +1847,9 @@ struct WorkerRunRequest {
     gpu_uuid: Option<String>,
     #[serde(default)]
     input: Value,
-    #[serde(default = "default_timeout_secs")]
-    timeout_secs: u64,
+    /// Omitted budgets use the profile timeout, up to 21600 seconds.
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 async fn handle_worker_run(
@@ -1516,13 +1923,15 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
                 cmd.env("CUDA_VISIBLE_DEVICES", uuid);
                 cmd.env("DIFFUSER_GPU_UUID", uuid);
             }
+            let limit_secs = effective_exec_timeout_secs(req.timeout_secs, *timeout_secs);
+            cmd.env("DIFFUSER_TIMEOUT_SECS", limit_secs.to_string());
             let Ok(mut child) = cmd.spawn() else {
                 return json!({"ok": false, "error": "spawn_failed", "cleanup_ok": true});
             };
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(serde_json::to_string(&req.input).unwrap_or_default().as_bytes());
             }
-            let limit = Duration::from_secs(req.timeout_secs.min(*timeout_secs).clamp(1, 300));
+            let limit = Duration::from_secs(limit_secs);
             let deadline = std::time::Instant::now() + limit;
             loop {
                 match child.try_wait() {
@@ -1579,7 +1988,10 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
             let mut builder = rt
                 .http
                 .request(m, url)
-                .timeout(Duration::from_secs(req.timeout_secs.min(*timeout_secs).clamp(1, 300)))
+                .timeout(Duration::from_secs(effective_exec_timeout_secs(
+                    req.timeout_secs,
+                    *timeout_secs,
+                )))
                 .json(&req.input);
             if let Some(bf) = bearer_file {
                 if let Ok(tok) = fs::read_to_string(bf) {
@@ -1638,21 +2050,30 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
         .profiles
         .iter()
         .map(|p| {
-            let (kind, gpu_uuid) = match &p.adapter {
-                ProfileAdapter::Exec { gpu_uuid, .. } => ("exec".to_string(), gpu_uuid.clone()),
-                ProfileAdapter::Http { gpu_uuid, .. } => ("http".to_string(), gpu_uuid.clone()),
+            let (kind, gpu_uuid, timeout_secs) = match &p.adapter {
+                ProfileAdapter::Exec {
+                    gpu_uuid,
+                    timeout_secs,
+                    ..
+                } => ("exec".to_string(), gpu_uuid.clone(), *timeout_secs),
+                ProfileAdapter::Http {
+                    gpu_uuid,
+                    timeout_secs,
+                    ..
+                } => ("http".to_string(), gpu_uuid.clone(), *timeout_secs),
             };
             CapabilityInfo {
                 capability: p.capability.clone(),
                 kind,
                 gpu_uuid: gpu_uuid.or_else(|| gpus.first().map(|g| g.uuid.clone())),
                 description: p.description.clone(),
+                timeout_secs: bounded_timeout_secs(timeout_secs),
             }
         })
         .collect();
 
     let http = private_http_client()
-        .timeout(Duration::from_secs(120))
+        .timeout(rpc_http_timeout(MAX_JOB_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("http:{e}"))?;
 
@@ -1716,6 +2137,7 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const SECRET: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const SESSION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1953,5 +2375,786 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old, None);
+    }
+
+    fn open_state(name: &str) -> (PathBuf, FleetState, HeaderMap) {
+        let root = std::env::temp_dir().join(format!(
+            "fleet-{name}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        crate::private_state::fixture_dir(&root);
+        let config = root.join("controller.json");
+        fs::write(
+            &config,
+            json!({"admin_token_sha256": sha256_hex(b"fixture")}).to_string(),
+        )
+        .unwrap();
+        let state = FleetState::open(&config, &root).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer fixture".parse().unwrap());
+        (root, state, headers)
+    }
+
+    async fn read_json(response: Response) -> Value {
+        let (status, value) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        value
+    }
+
+    async fn response_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body)
+            .unwrap_or(json!({"raw": String::from_utf8_lossy(&body).to_string()}));
+        (status, value)
+    }
+
+    fn worker_reserved(state: &FleetState) -> (i64, i64, i64) {
+        state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT cpu_reserved, ram_reserved, vram_reserved FROM fleet_workers WHERE worker_id='worker'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    fn mcp_tool(envelope: &Value) -> Value {
+        let text = envelope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        serde_json::from_str(text).unwrap_or(Value::Null)
+    }
+
+    #[derive(Clone)]
+    struct HoldState {
+        hits: Arc<AtomicUsize>,
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+
+    async fn handle_hold(State(rt): State<HoldState>) -> Json<Value> {
+        rt.hits.fetch_add(1, Ordering::SeqCst);
+        let mut release = rt.release.clone();
+        while !*release.borrow() {
+            if release.changed().await.is_err() {
+                break;
+            }
+        }
+        Json(json!({"ok": true, "output": {"echo": "async"}, "cleanup_ok": true}))
+    }
+
+    #[test]
+    fn async_job_returns_running_then_succeeds_and_replays_without_duplicate_execution() {
+        let (root, state, headers) = open_state("async");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let hold = HoldState {
+            hits: hits.clone(),
+            release: release_rx,
+        };
+        let (address, server) = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/fleet-worker/run", post(handle_hold))
+                .with_state(hold);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (address, server)
+        });
+
+        let enroll = serde_json::from_value(json!({
+            "worker_id": "worker", "host": "fixture", "rpc_secret_hex": SECRET, "rpc_session": SESSION,
+            "rpc_url": format!("http://{address}"),
+            "cpu_millicores": 4000, "ram_bytes": 2000000000, "vram_bytes": 0,
+            "capabilities": [{"capability": "fixture", "kind": "exec", "timeout_secs": 60}]
+        }))
+        .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(handle_enroll(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(enroll)
+                ))
+                .status(),
+            StatusCode::OK
+        );
+
+        let req: SubmitJobRequest = serde_json::from_value(json!({
+            "capability": "fixture",
+            "input": {"echo": "async"},
+            "async": true
+        }))
+        .unwrap();
+        let mut submit_headers = headers.clone();
+        submit_headers.insert("idempotency-key", "async-key".parse().unwrap());
+        let accepted = runtime.block_on(async {
+            let response = handle_submit_job(
+                State(state.clone()),
+                submit_headers.clone(),
+                Json(req.clone()),
+            )
+            .await;
+            read_json(response).await
+        });
+        assert_eq!(accepted["state"], "running");
+        assert_eq!(accepted["idempotent_replay"], false);
+        assert_eq!(accepted["capacity_released"], false);
+        assert_eq!(accepted["capability"], "fixture");
+        assert_eq!(accepted["worker_id"], "worker");
+        let job_id = accepted["job_id"].as_str().unwrap().to_string();
+
+        runtime.block_on(async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while hits.load(Ordering::SeqCst) == 0 {
+                assert!(std::time::Instant::now() < deadline, "worker was not called");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let auth = state.authenticate(&headers).unwrap();
+        let running = get_job_inner(&state, &auth, &job_id).unwrap();
+        assert_eq!(running["state"], "running");
+        assert_eq!(running["capacity_released"], false);
+        assert_eq!(running["worker_id"], "worker");
+        assert!(running["created_at_ms"].as_i64().unwrap() > 0);
+
+        let replay = runtime.block_on(async {
+            let response = handle_submit_job(
+                State(state.clone()),
+                submit_headers.clone(),
+                Json(req),
+            )
+            .await;
+            read_json(response).await
+        });
+        assert_eq!(replay["idempotent_replay"], true);
+        assert_eq!(replay["job_id"], job_id);
+        assert_eq!(replay["state"], "running");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        release_tx.send(true).unwrap();
+        runtime.block_on(async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let job = get_job_inner(&state, &auth, &job_id).unwrap();
+                if job["state"] != "running" {
+                    assert_eq!(job["state"], "succeeded");
+                    assert_eq!(job["output"], json!({"echo": "async"}));
+                    assert_eq!(job["capacity_released"], true);
+                    assert_eq!(job["error_code"], Value::Null);
+                    let digest = job["output_sha256"].as_str().unwrap();
+                    assert_eq!(digest.len(), 64);
+                    assert!(job["updated_at_ms"].as_i64().unwrap() >= job["created_at_ms"].as_i64().unwrap());
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "job stayed running: {job}");
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        });
+
+        let listed = runtime.block_on(async {
+            let response = handle_get_job(
+                State(state.clone()),
+                headers.clone(),
+                AxPath(job_id.clone()),
+            )
+            .await;
+            read_json(response).await
+        });
+        assert_eq!(listed["state"], "succeeded");
+        assert_eq!(listed["capacity_released"], true);
+        assert_eq!(listed["job_id"], job_id);
+
+        let mcp_get = runtime.block_on(async {
+            let response = handle_mcp(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {"name": "fleet_get_job", "arguments": {"job_id": job_id}}
+                })),
+            )
+            .await;
+            read_json(response).await
+        });
+        let via_mcp = mcp_tool(&mcp_get);
+        assert_eq!(via_mcp["state"], "succeeded");
+        assert_eq!(via_mcp["job_id"], job_id);
+        assert_eq!(via_mcp["capacity_released"], true);
+        assert_eq!(via_mcp["output"], json!({"echo": "async"}));
+        assert_eq!(via_mcp["worker_id"], "worker");
+
+        let issued = issue_token_inner(
+            &state,
+            &IssueTokenRequest {
+                actor: "other".into(),
+                project: "other".into(),
+                allowed_capabilities: vec!["*".into()],
+                max_vram_bytes: default_max_vram(),
+                ttl_secs: 60,
+            },
+        )
+        .unwrap();
+        let mut foreign = HeaderMap::new();
+        foreign.insert(
+            "authorization",
+            format!("Bearer {}", issued["token"].as_str().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            runtime
+                .block_on(handle_get_job(
+                    State(state.clone()),
+                    foreign,
+                    AxPath(job_id.clone())
+                ))
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let after = runtime.block_on(async {
+            let response = handle_submit_job(
+                State(state.clone()),
+                submit_headers,
+                Json(serde_json::from_value(json!({"capability":"fixture","async":true})).unwrap()),
+            )
+            .await;
+            read_json(response).await
+        });
+        assert_eq!(after["idempotent_replay"], true);
+        assert_eq!(after["job_id"], job_id);
+        assert_eq!(after["state"], "succeeded");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let mcp_submit = runtime.block_on(async {
+            let response = handle_mcp(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "fleet_submit_job",
+                        "arguments": {
+                            "capability": "fixture",
+                            "idempotency_key": "mcp-async",
+                            "async": true,
+                            "input": {"from": "mcp"}
+                        }
+                    }
+                })),
+            )
+            .await;
+            read_json(response).await
+        });
+        let started = mcp_tool(&mcp_submit);
+        assert_eq!(started["state"], "running");
+        assert_eq!(started["idempotent_replay"], false);
+        assert_eq!(started["capacity_released"], false);
+        assert_eq!(started["capability"], "fixture");
+        let mcp_job = started["job_id"].as_str().unwrap().to_string();
+        runtime.block_on(async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let job = get_job_inner(&state, &auth, &mcp_job).unwrap();
+                if job["state"] != "running" {
+                    assert_eq!(job["state"], "succeeded");
+                    assert_eq!(job["capacity_released"], true);
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "mcp job stayed running");
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        });
+        let mcp_replay = runtime.block_on(async {
+            let response = handle_mcp(
+                State(state.clone()),
+                headers,
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "fleet_submit_job",
+                        "arguments": {
+                            "capability": "fixture",
+                            "idempotency_key": "mcp-async",
+                            "async": true
+                        }
+                    }
+                })),
+            )
+            .await;
+            read_json(response).await
+        });
+        let replayed = mcp_tool(&mcp_replay);
+        assert_eq!(replayed["job_id"], mcp_job);
+        assert_eq!(replayed["idempotent_replay"], true);
+        assert_eq!(replayed["state"], "succeeded");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        let reserved: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT cpu_reserved FROM fleet_workers WHERE worker_id='worker'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reserved, 0);
+
+        server.abort();
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_timeout_above_120_seconds_is_honored() {
+        assert_eq!(bounded_timeout_secs(5_400), 5_400);
+        assert_eq!(bounded_timeout_secs(21_600), 21_600);
+        assert_eq!(bounded_timeout_secs(21_601), 21_600);
+        assert_eq!(bounded_timeout_secs(0), 1);
+        assert_eq!(rpc_http_timeout(5_400), Duration::from_secs(5_460));
+        assert!(rpc_http_timeout(5_400).as_secs() > 120);
+        assert_eq!(effective_exec_timeout_secs(Some(5_400), 5_400), 5_400);
+        assert_eq!(effective_exec_timeout_secs(None, 5_400), 5_400);
+        assert_eq!(effective_exec_timeout_secs(Some(5_400), 60), 60);
+        assert_eq!(effective_exec_timeout_secs(Some(30_000), 21_600), 21_600);
+
+        let (root, state, headers) = open_state("timeout");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let worker = Arc::new(WorkerRuntime {
+            cfg: serde_json::from_value(json!({
+                "worker_id": "worker", "host": "fixture", "bind": "127.0.0.1:0",
+                "advertise_url": "http://127.0.0.1", "controller_url": "http://127.0.0.1",
+                "enroll_bearer": "fixture", "rpc_secret_hex": SECRET, "auto_detect_gpus": false,
+                "profiles": [{
+                    "capability": "long",
+                    "adapter": {
+                        "kind": "exec",
+                        "command": ["/bin/sh", "-c", "printf %s \"$DIFFUSER_TIMEOUT_SECS\""],
+                        "timeout_secs": 5400
+                    }
+                }]
+            }))
+            .unwrap(),
+            http: private_http_client()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            rpc_session: SESSION.into(),
+            replay: Mutex::default(),
+            clock: now_ms,
+        });
+        let (address, server) = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/fleet-worker/run", post(handle_worker_run))
+                .with_state(worker.clone());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (address, server)
+        });
+        let enroll = serde_json::from_value(json!({
+            "worker_id": "worker", "host": "fixture", "rpc_secret_hex": SECRET, "rpc_session": SESSION,
+            "rpc_url": format!("http://{address}"),
+            "cpu_millicores": 1000, "ram_bytes": 500000000, "vram_bytes": 0,
+            "capabilities": [{"capability": "long", "kind": "exec", "timeout_secs": 5400}]
+        }))
+        .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(handle_enroll(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(enroll)
+                ))
+                .status(),
+            StatusCode::OK
+        );
+        let mut submit_headers = headers;
+        submit_headers.insert("idempotency-key", "long-key".parse().unwrap());
+        let reply = runtime.block_on(async {
+            let response = handle_submit_job(
+                State(state.clone()),
+                submit_headers,
+                Json(serde_json::from_value(json!({
+                    "capability": "long",
+                    "timeout_secs": 5400,
+                    "input": {}
+                }))
+                .unwrap()),
+            )
+            .await;
+            read_json(response).await
+        });
+        assert_eq!(reply["state"], "succeeded");
+        assert_eq!(reply["output"], 5400);
+        assert_eq!(reply["capacity_released"], true);
+
+        let direct = execute_profile(
+            &worker,
+            &WorkerRunRequest {
+                job_id: "fjob_cccccccccccccccccccccccccccccccc".into(),
+                rpc_session: SESSION.into(),
+                issued_at_ms: now_ms(),
+                capability: "long".into(),
+                gpu_uuid: None,
+                input: json!({}),
+                timeout_secs: None,
+            },
+        );
+        assert_eq!(direct["ok"], true);
+        assert_eq!(direct["output"], 5400);
+
+        server.abort();
+        drop(runtime);
+        drop(worker);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn capacity_released_migration_is_idempotent() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE fleet_jobs(job_id TEXT); INSERT INTO fleet_jobs VALUES ('old');",
+        )
+        .unwrap();
+        add_capacity_released_column(&mut db).unwrap();
+        add_capacity_released_column(&mut db).unwrap();
+        let released: i64 = db
+            .query_row(
+                "SELECT capacity_released FROM fleet_jobs WHERE job_id='old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(released, 0);
+    }
+
+    #[test]
+    fn zero_resource_async_reserves_capacity_and_enforces_inflight_cap() {
+        let (root, state, headers) = open_state("zero-cap");
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let hold = HoldState {
+            hits: Arc::new(AtomicUsize::new(0)),
+            release: release_rx,
+        };
+        let (address, server) = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/fleet-worker/run", post(handle_hold))
+                .with_state(hold);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (address, server)
+        });
+        let enroll = serde_json::from_value(json!({
+            "worker_id": "worker", "host": "fixture", "rpc_secret_hex": SECRET, "rpc_session": SESSION,
+            "rpc_url": format!("http://{address}"),
+            "cpu_millicores": 8000,
+            "ram_bytes": 8 * 1024 * 1024 * 1024u64,
+            "vram_bytes": 0,
+            "capabilities": [{"capability": "fixture", "kind": "exec", "timeout_secs": 60}]
+        }))
+        .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(handle_enroll(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(enroll)
+                ))
+                .status(),
+            StatusCode::OK
+        );
+
+        let zero_req = json!({
+            "capability": "fixture",
+            "async": true,
+            "cpu_millicores": 0,
+            "ram_bytes": 0,
+            "min_vram_bytes": 0,
+            "input": {}
+        });
+        runtime.block_on(async {
+            for n in 0..MAX_INFLIGHT_PER_ACTOR_PROJECT as usize {
+                let mut submit_headers = headers.clone();
+                submit_headers.insert("idempotency-key", format!("zero-{n}").parse().unwrap());
+                let req: SubmitJobRequest = serde_json::from_value(zero_req.clone()).unwrap();
+                let response = handle_submit_job(State(state.clone()), submit_headers, Json(req)).await;
+                let accepted = read_json(response).await;
+                assert_eq!(accepted["state"], "running");
+                assert_eq!(accepted["idempotent_replay"], false);
+            }
+            let (cpu, ram, vram) = worker_reserved(&state);
+            let floor_cpu = MIN_JOB_CPU_MILLICORES as i64;
+            let floor_ram = MIN_JOB_RAM_BYTES as i64;
+            assert_eq!(cpu, floor_cpu * MAX_INFLIGHT_PER_ACTOR_PROJECT);
+            assert_eq!(ram, floor_ram * MAX_INFLIGHT_PER_ACTOR_PROJECT);
+            assert!(cpu > 0);
+            assert!(ram > 0);
+            assert_eq!(vram, 0);
+
+            let mut replay_headers = headers.clone();
+            replay_headers.insert("idempotency-key", "zero-0".parse().unwrap());
+            let replay_req: SubmitJobRequest = serde_json::from_value(zero_req.clone()).unwrap();
+            let replay = read_json(
+                handle_submit_job(State(state.clone()), replay_headers, Json(replay_req)).await,
+            )
+            .await;
+            assert_eq!(replay["idempotent_replay"], true);
+            assert_eq!(replay["state"], "running");
+            assert_eq!(worker_reserved(&state).0, floor_cpu * MAX_INFLIGHT_PER_ACTOR_PROJECT);
+
+            let mut overflow_headers = headers.clone();
+            overflow_headers.insert("idempotency-key", "zero-overflow".parse().unwrap());
+            let overflow_req: SubmitJobRequest = serde_json::from_value(zero_req.clone()).unwrap();
+            let (status, body) = response_json(
+                handle_submit_job(State(state.clone()), overflow_headers, Json(overflow_req)).await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body["error"]["code"], "capacity_exhausted");
+            let running: i64 = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM fleet_jobs WHERE actor='admin' AND project='default' AND state='running'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(running, MAX_INFLIGHT_PER_ACTOR_PROJECT);
+            assert_eq!(worker_reserved(&state).0, floor_cpu * MAX_INFLIGHT_PER_ACTOR_PROJECT);
+
+            let issued = issue_token_inner(
+                &state,
+                &IssueTokenRequest {
+                    actor: "other".into(),
+                    project: "side".into(),
+                    allowed_capabilities: vec!["fixture".into()],
+                    max_vram_bytes: default_max_vram(),
+                    ttl_secs: 60,
+                },
+            )
+            .unwrap();
+            let mut other_headers = HeaderMap::new();
+            other_headers.insert(
+                "authorization",
+                format!("Bearer {}", issued["token"].as_str().unwrap())
+                    .parse()
+                    .unwrap(),
+            );
+            other_headers.insert("idempotency-key", "other-zero".parse().unwrap());
+            let other_req: SubmitJobRequest = serde_json::from_value(zero_req).unwrap();
+            let other = read_json(
+                handle_submit_job(State(state.clone()), other_headers, Json(other_req)).await,
+            )
+            .await;
+            assert_eq!(other["state"], "running");
+            assert_eq!(
+                worker_reserved(&state).0,
+                floor_cpu * (MAX_INFLIGHT_PER_ACTOR_PROJECT + 1)
+            );
+            let (status, _) = response_json(
+                handle_submit_job(
+                    State(state.clone()),
+                    {
+                        let mut again = headers.clone();
+                        again.insert("idempotency-key", "zero-overflow-2".parse().unwrap());
+                        again
+                    },
+                    Json(serde_json::from_value(json!({
+                        "capability": "fixture",
+                        "async": true,
+                        "cpu_millicores": 0,
+                        "ram_bytes": 0,
+                        "min_vram_bytes": 0
+                    }))
+                    .unwrap()),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        });
+
+        release_tx.send(true).unwrap();
+        runtime.block_on(async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let (cpu, ram, vram) = worker_reserved(&state);
+                let running: i64 = state
+                    .db
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT COUNT(*) FROM fleet_jobs WHERE state='running'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if running == 0 && cpu == 0 && ram == 0 && vram == 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "zero-resource jobs stayed running={running} cpu={cpu} ram={ram}"
+                );
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        });
+
+        server.abort();
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sync_submit_drop_still_finishes_and_releases_capacity() {
+        let (root, state, headers) = open_state("sync-cancel");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let hold = HoldState {
+            hits: hits.clone(),
+            release: release_rx,
+        };
+        let (address, server) = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/fleet-worker/run", post(handle_hold))
+                .with_state(hold);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (address, server)
+        });
+        let enroll = serde_json::from_value(json!({
+            "worker_id": "worker", "host": "fixture", "rpc_secret_hex": SECRET, "rpc_session": SESSION,
+            "rpc_url": format!("http://{address}"),
+            "cpu_millicores": 4000, "ram_bytes": 2000000000, "vram_bytes": 0,
+            "capabilities": [{"capability": "fixture", "kind": "exec", "timeout_secs": 60}]
+        }))
+        .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(handle_enroll(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(enroll)
+                ))
+                .status(),
+            StatusCode::OK
+        );
+
+        let req: SubmitJobRequest = serde_json::from_value(json!({
+            "capability": "fixture",
+            "async": false,
+            "cpu_millicores": 500,
+            "ram_bytes": 128 * 1024 * 1024u64,
+            "input": {"hold": true}
+        }))
+        .unwrap();
+        let mut submit_headers = headers;
+        submit_headers.insert("idempotency-key", "sync-cancel".parse().unwrap());
+        runtime.block_on(async {
+            let state_submit = state.clone();
+            let headers_submit = submit_headers.clone();
+            let req_submit = req.clone();
+            let client = tokio::spawn(async move {
+                handle_submit_job(State(state_submit), headers_submit, Json(req_submit)).await
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while hits.load(Ordering::SeqCst) == 0 {
+                assert!(std::time::Instant::now() < deadline, "worker was not called");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let (cpu, ram, _) = worker_reserved(&state);
+            assert_eq!(cpu, 500);
+            assert_eq!(ram, 128 * 1024 * 1024);
+            let (job_state, released): (String, i64) = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT state, capacity_released FROM fleet_jobs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(job_state, "running");
+            assert_eq!(released, 0);
+
+            client.abort();
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "dispatch was cancelled with the client");
+            let (still, _): (String, i64) = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT state, capacity_released FROM fleet_jobs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(still, "running");
+
+            release_tx.send(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let (job_state, released): (String, i64) = state
+                    .db
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT state, capacity_released FROM fleet_jobs",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                let (cpu, ram, vram) = worker_reserved(&state);
+                if job_state != "running" {
+                    assert_eq!(job_state, "succeeded");
+                    assert_eq!(released, 1);
+                    assert_eq!(cpu, 0);
+                    assert_eq!(ram, 0);
+                    assert_eq!(vram, 0);
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "dropped sync client left job={job_state} cpu={cpu} ram={ram}"
+                );
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        });
+
+        server.abort();
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
     }
 }

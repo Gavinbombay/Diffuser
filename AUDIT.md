@@ -30,3 +30,10 @@ All six leads identified during the full high-effort pass were remediated and in
 - Unconditional subprocess block on `colab pay`, hard minimum compute-unit floor (`>= 200 CU`), per-job CU and walltime ceilings, and account-wide VM concurrency coordination.
 - Durable PID-stamped intent written before VM allocation, automatic VM shutdown on every exit/error/timeout/signal, owned-only session cleanup, and fail-closed lane quarantine on ambiguous cleanup.
 - Strict 256 KiB JSON and CLI output caps, bounded artifact transfers with SHA-256 verification before VM shutdown, and `TERM` + `KILL` + `ESRCH` process-group reaping.
+
+## Async Fleet Router Delta Audit (2026-11-21)
+
+- **Scope**: `src/cosp/fleet.rs` and `src/bin/lanes-ctl.rs` (async job execution `"async": true`, `GET /v1/fleet/jobs/{job_id}`, MCP `fleet_get_job`, 6-hour profile timeout ceiling).
+- **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`).
+- **Closed findings**: Zero-resource async capacity bypass (enforced 100 millicores + 64 MiB minima and atomic 16-job per-actor/project in-flight cap), synchronous disconnect capacity leak (unified cancellation-independent background dispatch with oneshot reply), and synchronous `lanes-ctl` omitted-timeout client wait alignment (`21660 s`).
+- **Result**: `0` open confirmed findings, `0` open `needs_validation`, `9/9` fleet tests passing in isolated `bwrap` sandbox, both Node validators exit `0`.
