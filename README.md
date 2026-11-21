@@ -1,19 +1,18 @@
-<p align="center">
-  <img src="assets/diffuser-logo.png" alt="Diffuser logo: three colored routes branching from a central hub" width="200">
-</p>
+<p align="center"><img src="docs/assets/diffuser-mark.png" alt="Diffuser mark: three colored routes branching from a central hub" width="88"></p>
 
 # Diffuser
 
 ### One request. The right worker.
 
-[![License: Apache License 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange.svg)](Cargo.toml)
-[![Protocol](https://img.shields.io/badge/Protocol-service--lane%2Fv1_%7C_diffuser--lane%2Fv1-teal.svg)](#architecture)
-[![Security Audit](docs/badges/security-audit.svg)](AUDIT.md)
+[![License: Apache License 2.0](docs/badges/license.svg)](LICENSE)
+[![Build: 93 Rust + 39 Colab passed](docs/badges/build.svg)](#quickstart)
+[![Security audit: PASS, zero open findings](docs/badges/security-audit.svg)](AUDIT.md)
+
+![A precision prism hub diffusing one incoming golden beam into three balanced compute conduits](docs/assets/diffuser-hero.jpg)
 
 **Diffuser is a Rust resource router, typed SDK, and operator CLI for tools, agents, and services.** It discovers compatible CPU and CUDA workers, reserves exact capacity under a lease, executes idempotent jobs with durable result readback, and holds capacity on uncertain teardown until independent cleanup is witnessed.
 
-[For AI agents](#for-ai-agents) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Native CUDA worker](#native-cuda-worker) · [Google Colab GPU fleet](#google-colab-gpu-fleet) · [Security audit](AUDIT.md)
+[For AI agents](#for-ai-agents) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Native CUDA worker](#native-cuda-worker) · [Google Colab GPU fleet](#google-colab-gpu-fleet) · [Security notes](docs/SECURITY.md) · [Security audit](AUDIT.md)
 
 ## Features
 
@@ -34,9 +33,9 @@
 
 ```mermaid
 flowchart LR
-    Client["Tool / Agent / lanes-ctl"] -->|"HTTP + Bearer + Idempotency-Key"| Controller["uai-diffuser (Controller)"]
+    Client["Tool / Agent / lanes-ctl"] -->|"HTTP + Bearer + Idempotency-Key"| Controller["Diffuser (Controller)"]
     Controller -->|"SQLite Claims & Artifacts"| Store["Durable Store + Custody Ledger"]
-    Controller -->|"HMAC-Signed RPC (Loopback / SSH Tunnel / LAN)"| Worker["uai-diffuser --worker-config"]
+    Controller -->|"HMAC-Signed RPC (Loopback / SSH Tunnel / LAN)"| Worker["Diffuser Worker (--fleet-worker / --worker-config)"]
     Worker -->|"PrivateProcess (CPU)"| CPU["Isolated CPU Helper"]
     Worker -->|"CudaProcess (/proc/self/fd, env_clear)"| CUDA["Native CUDA Helper (libcuda.so.1)"]
 ```
