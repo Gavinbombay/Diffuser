@@ -254,14 +254,20 @@ fn fleet_cli(a: &[String]) -> Result<Value> {
     let base = common::opt(a, "--url").unwrap_or_else(|| "http://127.0.0.1:5820".into());
     let base = base.trim_end_matches('/');
     let token = fleet_token()?;
+    let sub = a.first().map(String::as_str).unwrap_or("");
+    let run_async = a.iter().any(|flag| flag == "--async");
+    let timeout_override = common::opt(a, "--timeout-secs").and_then(|value| value.parse::<u64>().ok());
+    let client_timeout = if sub == "submit" && !run_async {
+        timeout_override.unwrap_or(21_600).clamp(1, 21_600).saturating_add(60)
+    } else {
+        120
+    };
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(client_timeout))
         .build()
         .map_err(|_| Failure(75, "diffuser_unavailable"))?;
-
-    let sub = a.first().map(String::as_str).unwrap_or("");
     let resp = match sub {
         "discover" => client
             .get(format!("{base}/v1/fleet/discover"))
@@ -321,6 +327,12 @@ fn fleet_cli(a: &[String]) -> Result<Value> {
                 "capability": capability,
                 "input": input
             });
+            if let Some(secs) = timeout_override {
+                body["timeout_secs"] = json!(secs.clamp(1, 21_600));
+            }
+            if run_async {
+                body["async"] = json!(true);
+            }
             if let Some(gpu) = pin_gpu_uuid {
                 body["pin_gpu_uuid"] = json!(gpu);
             }
