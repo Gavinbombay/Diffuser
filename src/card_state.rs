@@ -153,13 +153,22 @@ pub(crate) fn annotate_proof(
     }
 }
 
-/// The reader is injected so callers can supply a snapshot or an in-memory test source.
-pub(crate) fn refresh<F>(dir: &Path, now: u64, mut read: F) -> HashMap<String, Value>
+/// Refresh only snapshots delivered through the service-owned state directory.
+pub(crate) fn refresh(dir: &Path, now: u64) -> HashMap<String, Value> {
+    let root = crate::private_state::PrivateDir::open(dir).ok();
+    refresh_with(now, |path| {
+        root.as_ref()
+            .ok_or(std::io::ErrorKind::PermissionDenied.into())
+            .and_then(|root| root.read(path))
+    })
+}
+
+fn refresh_with<F>(now: u64, mut read: F) -> HashMap<String, Value>
 where
     F: FnMut(&Path) -> std::io::Result<Vec<u8>>,
 {
     CARDS.iter().map(|(card, path)| {
-        let state = read(&dir.join(path)).ok()
+        let state = read(Path::new(path)).ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|v| crate::schema_wire::card_state(v) && validator().is_valid(v) && v["card"] == *card);
         let row = match state {
@@ -234,7 +243,6 @@ mod tests {
             "future",
         ];
         let (base, probe, now) = warp_proof_fixture();
-        let dir = std::env::temp_dir();
         let mut evidence = Vec::new();
         for previous in states
             .into_iter()
@@ -258,7 +266,7 @@ mod tests {
                 } else {
                     serde_json::to_vec(&incoming).unwrap()
                 };
-                let rows = refresh(&dir, now, |path| {
+                let rows = refresh_with(now, |path| {
                     if path.ends_with("cards/warp-2070.json") && event != "missing" {
                         Ok(bytes.clone())
                     } else {
@@ -463,7 +471,7 @@ mod tests {
     fn refreshed_snapshot_proof_requires_matching_registration() {
         let (dir, state) = fixture();
         let now = state["epoch"].as_u64().unwrap();
-        let rows = refresh(&dir, now, |p| fs::read(p));
+        let rows = refresh(&dir, now);
         let probe = json!({"epoch":now,"util":state["util"],"watts":state["watts"]});
         assert_eq!(
             snapshot_proof(&rows["warp-2070"], Some("warp-2070"), now, Some(&probe)),
@@ -482,7 +490,7 @@ mod tests {
     fn stale_or_unreadable_snapshot_never_proves() {
         let (dir, state) = fixture();
         let now = state["epoch"].as_u64().unwrap() + 181;
-        let rows = refresh(&dir, now, |p| fs::read(p));
+        let rows = refresh(&dir, now);
         assert_eq!(
             snapshot_proof(&rows["warp-2070"], Some("warp-2070"), now, None),
             Err(crate::error_catalog::STALE_STATE)
@@ -496,7 +504,7 @@ mod tests {
     fn proof_annotation_preserves_other_admission_decisions() {
         let (dir, state) = fixture();
         let now = state["epoch"].as_u64().unwrap();
-        let rows = refresh(&dir, now, |p| fs::read(p));
+        let rows = refresh(&dir, now);
         let probe = json!({"epoch":now,"util":state["util"],"watts":state["watts"]});
         let mut row = json!({"accepting":false});
         annotate_proof(
@@ -607,15 +615,16 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(dir.join("cards")).unwrap();
+        crate::private_state::fixture_dir(&dir);
+        crate::private_state::fixture_dir(&dir.join("cards"));
         let bytes = include_bytes!("../tests/fixtures/card-state/warp-2070.json");
-        fs::write(dir.join("cards/warp-2070.json"), bytes).unwrap();
+        crate::private_state::fixture_file(&dir.join("cards/warp-2070.json"), bytes);
         (dir, serde_json::from_slice(bytes).unwrap())
     }
     #[test]
     fn fresh_valid_card_stored() {
         let (dir, v) = fixture();
-        let rows = refresh(&dir, v["epoch"].as_u64().unwrap(), |p| fs::read(p));
+        let rows = refresh(&dir, v["epoch"].as_u64().unwrap());
         assert_eq!(rows["warp-2070"]["util"], 3);
         assert_eq!(rows["warp-2070"]["stale"], false);
     }
@@ -624,8 +633,8 @@ mod tests {
         let (dir, _) = fixture();
         let bytes = include_bytes!("../tests/fixtures/card-state/colab-l4-state.json");
         let v: Value = serde_json::from_slice(bytes).unwrap();
-        fs::write(dir.join("colab-l4-state.json"), bytes).unwrap();
-        let rows = refresh(&dir, v["epoch"].as_u64().unwrap(), |p| fs::read(p));
+        crate::private_state::fixture_file(&dir.join("colab-l4-state.json"), bytes);
+        let rows = refresh(&dir, v["epoch"].as_u64().unwrap());
         assert_eq!(rows["colab-l4"]["gpu_class"], "L4");
         assert_eq!(rows["colab-l4"]["vram_gb"], 24);
     }
@@ -634,10 +643,10 @@ mod tests {
         let (dir, v) = fixture();
         let epoch = v["epoch"].as_u64().unwrap();
         assert_eq!(
-            refresh(&dir, epoch + 179, |p| fs::read(p))["warp-2070"]["stale"],
+            refresh(&dir, epoch + 179)["warp-2070"]["stale"],
             false
         );
-        let stale = &refresh(&dir, epoch + 181, |p| fs::read(p))["warp-2070"];
+        let stale = &refresh(&dir, epoch + 181)["warp-2070"];
         assert_eq!(stale["stale"], true);
         assert_eq!(stale["util"], "unknown");
     }
@@ -645,7 +654,7 @@ mod tests {
     fn missing_state_unreadable() {
         let (dir, v) = fixture();
         assert_eq!(
-            refresh(&dir, v["epoch"].as_u64().unwrap(), |p| fs::read(p))["echo-3060"]["state"],
+            refresh(&dir, v["epoch"].as_u64().unwrap())["echo-3060"]["state"],
             crate::error_catalog::STATE_UNREADABLE
         );
     }
@@ -655,20 +664,20 @@ mod tests {
         let path = dir.join("cards/warp-2070.json");
         fs::write(&path, b"{").unwrap();
         assert_eq!(
-            refresh(&dir, 0, |p| fs::read(p))["warp-2070"]["state"],
+            refresh(&dir, 0)["warp-2070"]["state"],
             crate::error_catalog::STATE_UNREADABLE
         );
         v["schema_version"] = json!("other");
         fs::write(path, serde_json::to_vec(&v).unwrap()).unwrap();
         assert_eq!(
-            refresh(&dir, 0, |p| fs::read(p))["warp-2070"]["state"],
+            refresh(&dir, 0)["warp-2070"]["state"],
             crate::error_catalog::STATE_UNREADABLE
         );
     }
     #[test]
     fn workers_row_contains_stored_fields() {
         let (dir, v) = fixture();
-        let rows = refresh(&dir, v["epoch"].as_u64().unwrap(), |p| fs::read(p));
+        let rows = refresh(&dir, v["epoch"].as_u64().unwrap());
         let mut row = json!({"accepting":true,"why_not":[]});
         apply(&mut row, &rows["warp-2070"]);
         for field in [

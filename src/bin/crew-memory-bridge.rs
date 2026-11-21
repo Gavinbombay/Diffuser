@@ -110,6 +110,19 @@ fn ledger(c: &Bridge) -> Result<rusqlite::Connection> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS episodes (path TEXT NOT NULL, blob TEXT NOT NULL, chunk INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, rev TEXT NOT NULL, episode TEXT, updated INTEGER NOT NULL, PRIMARY KEY(path,blob,chunk,kind)); CREATE TABLE IF NOT EXISTS writes (id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);").map_err(|_|Failure(70,"storage_unavailable"))?;
     Ok(db)
 }
+fn approved_memory_url(url: &str) -> Result<String> {
+    use lane_router::transport::{is_loopback, private_http_url};
+    let parsed = reqwest::Url::parse(url).map_err(|_| Failure(68, "memory_url_invalid"))?;
+    if !private_http_url(&parsed)
+        || !(parsed.host_str() == Some("thaladex.united-ai.ca") || is_loopback(&parsed))
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return common::fail(68, "memory_url_not_approved");
+    }
+    Ok(parsed.as_str().trim_end_matches('/').into())
+}
+
 fn credentials(c: &Bridge) -> Result<(String, zeroize::Zeroizing<String>)> {
     let raw = common::protected(&c.env, true)?;
     let mut url = None;
@@ -135,22 +148,14 @@ fn credentials(c: &Bridge) -> Result<(String, zeroize::Zeroizing<String>)> {
         .clone()
         .or(url)
         .ok_or(Failure(68, "memory_url_field_missing"))?;
-    let parsed = reqwest::Url::parse(&url).map_err(|_| Failure(68, "memory_url_invalid"))?;
-    if !matches!(
-        parsed.host_str(),
-        Some("thaladex.united-ai.ca" | "localhost")
-    ) || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
-        return common::fail(68, "memory_url_not_approved");
-    }
+    let url = approved_memory_url(&url)?;
     if auth.is_empty() {
         return common::fail(68, "memory_auth_field_missing");
     }
     if layer.as_deref() != Some("crew-memory") {
         return common::fail(68, "memory_layer_not_expected");
     }
-    Ok((url.trim_end_matches('/').into(), auth))
+    Ok((url, auth))
 }
 fn remote(c: &Bridge, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
     let (url, auth) = credentials(c)?;
@@ -835,6 +840,62 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_url_requires_tls_for_the_approved_remote_host() {
+        assert_eq!(
+            approved_memory_url("https://thaladex.united-ai.ca/").unwrap(),
+            "https://thaladex.united-ai.ca"
+        );
+        assert!(approved_memory_url("http://localhost:5820").is_ok());
+        assert!(approved_memory_url("http://[::1]:5820").is_ok());
+        for url in [
+            "http://thaladex.united-ai.ca",
+            "https://thaladex.united-ai.ca.example",
+            "https://user@thaladex.united-ai.ca",
+        ] {
+            assert_eq!(approved_memory_url(url).unwrap_err().1, "memory_url_not_approved");
+        }
+    }
+
+    #[test]
+    fn memory_bearer_uses_direct_loopback_and_stops_at_redirect() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        for redirect in [false, true] {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let target = format!("{origin}/other");
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                // Closing the listener makes an unexpected follow-up fail immediately.
+                drop(listener);
+                let mut request = BufReader::new(&socket);
+                let mut bearer = false;
+                loop {
+                    let mut line = String::new();
+                    if request.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    bearer |= line.trim_end().eq_ignore_ascii_case("authorization: Bearer fixture");
+                }
+                assert!(bearer);
+                if redirect {
+                    write!(socket, "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+                }
+            });
+            let response = common::http("GET", &origin, None, Some("fixture"));
+            server.join().unwrap();
+            if redirect {
+                assert_eq!(response.unwrap_err().1, "upstream_refused");
+            } else {
+                assert_eq!(response.unwrap(), json!({}));
+            }
+        }
+    }
     use std::os::unix::fs::MetadataExt;
     #[test]
     fn lock_preserves_existing_inode_and_contents() {

@@ -148,7 +148,7 @@ pub(super) struct WorkerReceipt {
 }
 
 // HMAC-SHA256, with a fixed-size secret supplied over the protected channel.
-fn receipt_mac(key: &[u8; 32], body: &[u8]) -> [u8; 32] {
+pub(super) fn receipt_mac(key: &[u8; 32], body: &[u8]) -> [u8; 32] {
     let mut inner = [0x36u8; 64];
     let mut outer = [0x5cu8; 64];
     for (i, byte) in key.iter().enumerate() {

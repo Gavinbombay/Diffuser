@@ -482,6 +482,20 @@ pub fn validate_brief(root: &std::path::Path) -> Result<Value> {
     }
     Ok(json!({"valid":true,"brief_sha256":common::hash(data)}))
 }
+fn ready_queue(s: &Spine) -> Result<Vec<Value>> {
+    let unavailable = |_| Failure(70, "storage_unavailable");
+    let c = database(s)?;
+    let mut stmt = c
+        .prepare("SELECT body FROM build_ready_jobs ORDER BY id")
+        .map_err(unavailable)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(unavailable)?;
+    rows.map(|row| {
+        serde_json::from_str(&row.map_err(unavailable)?)
+            .map_err(|_| Failure(70, "storage_unavailable"))
+    })
+    .collect()
+}
+
 async fn handle(
     State(s): State<Spine>,
     OriginalUri(uri): OriginalUri,
@@ -491,12 +505,52 @@ async fn handle(
 ) -> Response {
     let path = uri.path().to_string();
     let method = m.to_string();
-    let r=tokio::task::spawn_blocking(move||->Result<(u16,Value)>{let data=if b.is_empty(){json!({})}else{serde_json::from_slice(&b).map_err(|_|Failure(400,"schema_invalid"))?};
- if method=="GET"{let c=database(&s)?;return Ok((200,match path.as_str(){"/health"=>{let mut v=gate(&c);v["ready"]=json!(true);v["version"]=json!("0.3.0");v["profile"]=json!(if s.edge{"embed-edge"}else{"primary"});v["lanes_summary"]=json!(lanes());v},"/v1/health"=>json!({"protocol":"service-lane/v1","lanes":lanes(),"workers":[{"worker_id":"echo-3060","accepting":false,"status":"retired"},{"worker_id":"warp-2070","accepting":false,"status":"disabled_fault"}]}),"/v1/embed/health"=>{let v=embed_health(&s)?;if v["alert_state"]=="crit_all_embed_workers_down"{return Ok((503,v))}v},"/v1/build-lanes/ready"=>{let mut st=c.prepare("SELECT body FROM build_ready_jobs ORDER BY id").map_err(|_|Failure(70,"storage_unavailable"))?;let rows=st.query_map([],|r|r.get::<_,String>(0)).map_err(|_|Failure(70,"storage_unavailable"))?;let mut items=Vec::<Value>::new();for row in rows{items.push(serde_json::from_str(&row.map_err(|_|Failure(70,"storage_unavailable"))?).map_err(|_|Failure(70,"storage_unavailable"))?)}json!({"items":items,"next_cursor":null})},_=>return common::fail(404,"not_found")}))}
- if path=="/v1/embed"&&method=="POST"{return Ok((200,embed(&s,&data)?))}
- if path.starts_with("/v1/lanes/")&&path.ends_with("/jobs")&&method=="POST"{if data["consumer"].as_str().is_none_or(|v|v.is_empty()){return common::fail(400,"consumer_missing")}return common::fail(422,"capability_unavailable")}
- mutation(&s,&path,&h,&data)
- }).await;
+    let r = tokio::task::spawn_blocking(move || -> Result<(u16, Value)> {
+        if matches!(method.as_str(), "GET" | "HEAD") && path == "/v1/build-lanes/ready" {
+            if !s.admin {
+                return common::fail(401, "auth_required");
+            }
+            return ready_queue(&s).map(|items| (200, json!({"items":items,"next_cursor":null})));
+        }
+        let data = if b.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&b).map_err(|_| Failure(400, "schema_invalid"))?
+        };
+        if method == "GET" {
+            let c = database(&s)?;
+            return Ok((200, match path.as_str() {
+                "/health" => {
+                    let mut v = gate(&c);
+                    v["ready"] = json!(true);
+                    v["version"] = json!("0.3.0");
+                    v["profile"] = json!(if s.edge { "embed-edge" } else { "primary" });
+                    v["lanes_summary"] = json!(lanes());
+                    v
+                }
+                "/v1/health" => json!({"protocol":"service-lane/v1","lanes":lanes(),"workers":[{"worker_id":"echo-3060","accepting":false,"status":"retired"},{"worker_id":"warp-2070","accepting":false,"status":"disabled_fault"}]}),
+                "/v1/embed/health" => {
+                    let v = embed_health(&s)?;
+                    if v["alert_state"] == "crit_all_embed_workers_down" {
+                        return Ok((503, v));
+                    }
+                    v
+                }
+                _ => return common::fail(404, "not_found"),
+            }));
+        }
+        if path == "/v1/embed" && method == "POST" {
+            return Ok((200, embed(&s, &data)?));
+        }
+        if path.starts_with("/v1/lanes/") && path.ends_with("/jobs") && method == "POST" {
+            if data["consumer"].as_str().is_none_or(|v| v.is_empty()) {
+                return common::fail(400, "consumer_missing");
+            }
+            return common::fail(422, "capability_unavailable");
+        }
+        mutation(&s, &path, &h, &data)
+    })
+    .await;
     match r {
         Ok(Ok((rc, v))) => (StatusCode::from_u16(rc).unwrap(), axum::Json(v)).into_response(),
         Ok(Err(Failure(rc, c))) => err(
@@ -513,6 +567,36 @@ async fn handle(
 fn api(s: Spine) -> Router {
     api_with_namespace(s, lane_assignment::router())
 }
+
+#[derive(Clone)]
+struct ControlPeer(bool);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::UnixListener>>
+    for ControlPeer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        let owner = unsafe { libc::geteuid() };
+        Self(
+            stream
+                .io()
+                .peer_cred()
+                .is_ok_and(|peer| peer.uid() == owner || peer.uid() == 0),
+        )
+    }
+}
+
+fn control_api(s: Spine) -> Router {
+    api(s).layer(axum::middleware::from_fn(
+        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            use axum::extract::ConnectInfo;
+            match request.extensions().get::<ConnectInfo<ControlPeer>>() {
+                Some(ConnectInfo(ControlPeer(true))) => next.run(request).await,
+                _ => err(401, "auth_required"),
+            }
+        },
+    ))
+}
+
 fn api_with_namespace(s: Spine, namespace: Router<Spine>) -> Router {
     api_with_namespaces(s, namespace, fleet::closed_router())
 }
@@ -600,11 +684,17 @@ pub fn main_cli() -> i32 {
             Err(_) => return 70,
         };
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&admin, fs::Permissions::from_mode(0o600));
+        if fs::set_permissions(&admin, fs::Permissions::from_mode(0o600)).is_err() {
+            return 70;
+        }
         let mut custodial = s.clone();
         custodial.admin = true;
         tokio::spawn(async move {
-            let _ = axum::serve(u, api(custodial)).await;
+            let _ = axum::serve(
+                u,
+                control_api(custodial).into_make_service_with_connect_info::<ControlPeer>(),
+            )
+            .await;
         });
         // Retained router routes and handlers remain available as the fallback. No inherited worker is admitted.
         let legacy = crate::routes::router_with_app(crate::routes::new_app(
@@ -653,6 +743,91 @@ pub fn main_cli() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ready_queue_requires_owner_control_socket() {
+        use axum::http::Request;
+        use std::os::fd::AsRawFd;
+        use tower::ServiceExt;
+
+        let root = std::env::temp_dir().join(format!("ready-queue-{}", std::process::id()));
+        crate::private_state::fixture_dir(&root);
+        let state = Spine {
+            root: root.clone(),
+            edge: false,
+            worker_ports: [11434, 15820],
+            admin: false,
+            sequence: Arc::new(Mutex::new(0)),
+        };
+        let fixture = json!({"job_id":"example","input":"fixture-only input"});
+        database(&state)
+            .unwrap()
+            .execute(
+                "INSERT INTO build_ready_jobs VALUES ('example', ?1)",
+                [fixture.to_string()],
+            )
+            .unwrap();
+
+        const READY: &str = "/v1/build-lanes/ready";
+        for method in [Method::GET, Method::HEAD] {
+            let denied = api(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(READY)
+                        .header("authorization", "Bearer fixture-only")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+            let body = axum::body::to_bytes(denied.into_body(), 1024).await.unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("fixture-only input"));
+        }
+
+        let mut custodial = state;
+        custodial.admin = true;
+        let api = control_api(custodial);
+        for spoofed in [None, Some(axum::extract::ConnectInfo(ControlPeer(false)))] {
+            let mut request = Request::builder().uri(READY).body(axum::body::Body::empty()).unwrap();
+            if let Some(peer) = spoofed {
+                request.extensions_mut().insert(peer);
+            }
+            assert_eq!(api.clone().oneshot(request).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // Keep the Unix address short even when Cargo's scratch directory is long.
+        let dir = fs::File::open(&root).unwrap();
+        let socket = format!("/proc/self/fd/{}/control.sock", dir.as_raw_fd());
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, api.into_make_service_with_connect_info::<ControlPeer>())
+                .await
+                .unwrap();
+        });
+        let reply: Value = tokio::task::spawn_blocking(move || {
+            let _dir = dir;
+            reqwest::blocking::Client::builder()
+                .unix_socket(socket)
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap()
+                .get(format!("http://localhost{READY}"))
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply, json!({"items":[fixture],"next_cursor":null}));
+        server.abort();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn ready_schema_migration_preserves_existing_records() {
         let p = std::env::temp_dir().join(format!(

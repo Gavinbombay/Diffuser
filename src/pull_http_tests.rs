@@ -17,7 +17,8 @@ fn run_case(name: &str, case: u8) {
         return;
     }
     let root = std::env::temp_dir().join(format!("pull-http-{}-{case}", std::process::id()));
-    fs::create_dir_all(root.join("cards")).unwrap();
+    private_state::fixture_dir(&root);
+    private_state::fixture_dir(&root.join("cards"));
     auth_fixture(&root);
     fs::write(
         root.join("workers.cfg"),
@@ -44,7 +45,7 @@ fn run_case(name: &str, case: u8) {
         Ok("router-probe")
     );
     let card_path = root.join("cards/colab-l4-state.json");
-    fs::write(&card_path, serde_json::to_vec(&card).unwrap()).unwrap();
+    private_state::fixture_file(&card_path, card.to_string());
     let table = Arc::new(Mutex::new(JobTable::default()));
     table.lock().unwrap().enqueue_agent(json!({"job_id":"job-123","max_segs":if case == 4 {1} else {5},"lane":"tts","gpu_class":"l4"}), 9.0);
     let app = App {
@@ -69,7 +70,14 @@ fn run_case(name: &str, case: u8) {
         }
         let mut request = json!({"schema_version":"agent-pull/v1","agent_id":"agent-123","worker_id":"colab-l4","lanes":["tts"],"wait_s":1,"state_epoch":NOW});
         let mut current;
-        if case == 5 {
+        if case == 6 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&card_path, fs::Permissions::from_mode(0o660)).unwrap();
+            assert_eq!(pull(addr, request.clone()).await["status"], "empty");
+            assert!(!table.lock().unwrap().jobs.values().any(|j| j["state"] == "leased"));
+            private_state::fixture_file(&card_path, card.to_string());
+            assert_eq!(pull(addr, request).await["status"], "assigned");
+        } else if case == 5 {
             let mut other = request.clone(); other["agent_id"] = json!("agent-456");
             let (first, second) = tokio::join!(pull(addr, request), pull(addr, other));
             assert_eq!([first["status"].as_str(), second["status"].as_str()].iter().filter(|s| **s == Some("assigned")).count(), 1);
@@ -121,6 +129,10 @@ fn max_segs_exceeded_failed_with_reason() {
 #[test]
 fn two_agents_never_same_job() {
     run_case("two_agents_never_same_job", 5);
+}
+#[test]
+fn colab_pull_requires_a_private_snapshot() {
+    run_case("colab_pull_requires_a_private_snapshot", 6);
 }
 
 // Shared by the in-process reference tests; keep one fixture definition here.

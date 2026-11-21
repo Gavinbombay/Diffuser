@@ -40,7 +40,7 @@ pub(crate) async fn h_workers(
         .and_then(|v| v.trim().parse::<f64>().ok());
     let visibility_lane = lane.clone();
     let v = tokio::task::spawn_blocking(move || {
-        let snapshot = card_state::refresh(&state_dir, now, |p| fs::read(p));
+        let snapshot = card_state::refresh(&state_dir, now);
         *cards.lock().unwrap() = snapshot.clone();
         let local = reg
             .iter()
@@ -175,7 +175,7 @@ pub(crate) async fn submit_in_process(a: App, lane: String, body: axum::body::By
             .as_str()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/mnt/sn850x/lanes/gpu-backlog"));
-        let cards = card_state::refresh(&state_dir, now, |p| fs::read(p));
+        let cards = card_state::refresh(&state_dir, now);
         let local = reg
             .iter()
             .any(|w| w.id == "warp-2070")
