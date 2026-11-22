@@ -460,7 +460,7 @@ impl WitnessCtx {
     }
 }
 
-/// Boot the protected `/v1/diffuser` namespace for `uai-diffuser --protected-config <path>`.
+/// Boot the protected `/v1/diffuser` namespace for `diffuser --protected-config <path>`.
 pub(super) fn bootstrap_controller(
     config_path: &Path,
     state_dir: &Path,
@@ -679,7 +679,7 @@ async fn handle_worker_cleanup_evidence(
     }))
 }
 
-/// Run a standalone protected CPU or CUDA worker (`uai-diffuser --worker-config <path> --bind <ip:port> --state-dir <dir>`).
+/// Run a standalone protected CPU or CUDA worker (`diffuser --worker-config <path> --bind <ip:port> --state-dir <dir>`).
 pub(super) fn run_worker(config_path: &Path, bind: &str, state_dir: &Path) -> i32 {
     if let Err(err) = run_worker_inner(config_path, bind, state_dir) {
         eprintln!("protected_worker_error: {err}");

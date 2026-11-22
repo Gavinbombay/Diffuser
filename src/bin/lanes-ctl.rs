@@ -38,7 +38,7 @@ fn validate(root: &Path) -> Result<Value> {
     Ok(json!({"valid":true,"brief_sha256":common::hash(data)}))
 }
 fn request(a: &[String], method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    let socket = common::opt(a, "--socket").unwrap_or("/var/lib/uai-diffuser/control.sock".into());
+    let socket = common::opt(a, "--socket").unwrap_or("/var/lib/diffuser/control.sock".into());
     let client = reqwest::blocking::Client::builder()
         .unix_socket(socket)
         .timeout(std::time::Duration::from_secs(20))
@@ -113,7 +113,7 @@ fn publish(a: &[String]) -> Result<Value> {
     if !r.status.success() {
         return common::fail(67, "bundle_digest_mismatch");
     }
-    let dest = format!("/var/lib/uai-explorer/staged-bundles/{id}");
+    let dest = format!("/var/lib/explorer/staged-bundles/{id}");
     let r = Command::new("ssh")
         .args([
             "-n",

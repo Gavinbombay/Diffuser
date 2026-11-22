@@ -45,7 +45,7 @@ flowchart LR
 ### 1. Build
 
 ```sh
-cargo build --release --locked --bin uai-diffuser --bin lanes-ctl
+cargo build --release --locked --bin diffuser --bin lanes-ctl
 ```
 
 ### 2. Ordinary fail-closed startup
@@ -53,7 +53,7 @@ cargo build --release --locked --bin uai-diffuser --bin lanes-ctl
 Without `--protected-config`, `/v1/diffuser/*` fails closed (`503 routing_closed`, CLI exit `74`):
 
 ```sh
-./target/release/uai-diffuser --profile primary --bind localhost:5820 --state-dir ./state
+./target/release/diffuser --profile primary --bind localhost:5820 --state-dir ./state
 ```
 
 ### 3. Protected CPU controller & worker
@@ -62,10 +62,10 @@ Provision a `0600` worker config (`worker.json`) and controller config (`control
 
 ```sh
 # Terminal 1  -  protected CPU worker
-./target/release/uai-diffuser --worker-config ./worker.json --bind 127.0.0.1:5821 --state-dir ./worker-state
+./target/release/diffuser --worker-config ./worker.json --bind 127.0.0.1:5821 --state-dir ./worker-state
 
 # Terminal 2  -  protected controller
-./target/release/uai-diffuser --protected-config ./controller.json --bind localhost:5820 --state-dir ./ctrl-state
+./target/release/diffuser --protected-config ./controller.json --bind localhost:5820 --state-dir ./ctrl-state
 ```
 
 Drive the full lifecycle with `lanes-ctl` (passing the scoped bearer on stdin):
@@ -101,7 +101,7 @@ Configure `backend.kind = "cuda"` with the exact `device_uuid`, `helper_path`, a
 
 Diffuser includes a dynamic multi-worker fleet router (`/v1/fleet/*`), pluggable `exec`/`http` workload daemon (`--fleet-worker`), MCP JSON-RPC tool surface (`/v1/fleet/mcp`), `lanes-ctl fleet` CLI, and bundled agent onboarding skills (`skills/diffuser-onboard/SKILL.md`, `skills/diffuser-caller/SKILL.md`).
 
-- **Add any machine or GPU** without Rust changes: author a `0600` `fleet-worker.json` with `exec` (Blender, Whisper, native CUDA helper, custom scripts) or `http` (Ollama, ComfyUI, local services) profiles and start `uai-diffuser --fleet-worker fleet-worker.json`.
+- **Add any machine or GPU** without Rust changes: author a `0600` `fleet-worker.json` with `exec` (Blender, Whisper, native CUDA helper, custom scripts) or `http` (Ollama, ComfyUI, local services) profiles and start `diffuser --fleet-worker fleet-worker.json`.
 - **Issue scoped tokens** for people or agents: `lanes-ctl fleet token-issue --actor <name> --project <proj> --capabilities <csv>`.
 - **Large binary artifacts (up to 64 MiB)**: Upload and retrieve SHA-256-verified binary payloads via `POST /v1/fleet/artifacts` and `GET /v1/fleet/artifacts/{artifact_id}/content`.
 - **Authenticated HTTP backends**: `http` adapter profiles support optional `bearer_file` (`0600`) for upstream services like Ollama, OpenAI-compatible embedding servers, or ComfyUI.

@@ -2,7 +2,7 @@
 
 ## Overview and Purpose
 
-Diffuser (`uai-diffuser` / `lanes-ctl`) is a strict, auditable resource router for CPU and NVIDIA CUDA compute. When tools, scripts, or AI agents need compute, Diffuser solves three operational risks:
+Diffuser (`diffuser` / `lanes-ctl`) is a strict, auditable resource router for CPU and NVIDIA CUDA compute. When tools, scripts, or AI agents need compute, Diffuser solves three operational risks:
 
 1. **Wrong hardware**: Callers request an exact lane or exact GPU UUID (`GPU-...`). Diffuser refuses unavailable selections (`422 capability_unavailable`) instead of silently substituting another device.
 2. **Duplicate work on retries**: Callers submit with a stable `Idempotency-Key`. Retries return the original job instead of running duplicate compute, and result artifacts remain durably readable after worker exit.
@@ -19,18 +19,18 @@ Diffuser (`uai-diffuser` / `lanes-ctl`) is a strict, auditable resource router f
 
 ## Runtime Location
 
-- **Controller service**: `uai-diffuser.service` on your controller host (`localhost:5820`, admin socket `/var/lib/uai-diffuser/control.sock`, state `/var/lib/uai-diffuser`, protected config `/etc/diffuser/controller.json`, fleet config `/etc/diffuser/fleet.json`).
-- **CPU & GPU fleet workers**: Any number of local or remote `uai-diffuser --fleet-worker <config.json>` daemons (loopback or SSH-tunneled), plus optional protected single-worker daemons (`--worker-config`).
+- **Controller service**: `diffuser.service` on your controller host (`localhost:5820`, admin socket `/var/lib/diffuser/control.sock`, state `/var/lib/diffuser`, protected config `/etc/diffuser/controller.json`, fleet config `/etc/diffuser/fleet.json`).
+- **CPU & GPU fleet workers**: Any number of local or remote `diffuser --fleet-worker <config.json>` daemons (loopback or SSH-tunneled), plus optional protected single-worker daemons (`--worker-config`).
 - **Native CUDA helpers**: Deterministic zero-toolkit `libcuda.so.1` helper (`native/cuda/add_one.cpp`) compiled on any Linux NVIDIA host and connected locally or over encrypted SSH loopback tunnels (`ssh -L` / `-R`).
-- **Binaries & Source**: `/usr/local/bin/uai-diffuser`, `/usr/local/bin/lanes-ctl`, active repo `/srv/diffuser`, public repo `Gavinbombay/Diffuser`.
+- **Binaries & Source**: `/usr/local/bin/diffuser`, `/usr/local/bin/lanes-ctl`, active repo `/srv/diffuser`.
 
 ## Health and Logs
 
 - **HTTP health checks**: `curl -sS http://127.0.0.1:5820/health` and `curl -sS http://127.0.0.1:5820/v1/health` return JSON service and lane status.
 - **Authenticated discovery**: `lanes-ctl diffuser operator 127.0.0.1:5820 <TENANT> <PROJECT> <ACTOR> bearer-stdin discover` (passing the scoped bearer on stdin).
 - **Systemd status & logs**:
-  - `systemctl status uai-diffuser.service diffuser-cpu-worker.service`
-  - `journalctl -u uai-diffuser.service -u diffuser-cpu-worker.service -n 100 --no-pager`
+  - `systemctl status diffuser.service diffuser-cpu-worker.service`
+  - `journalctl -u diffuser.service -u diffuser-cpu-worker.service -n 100 --no-pager`
 
 ## Failure Modes
 

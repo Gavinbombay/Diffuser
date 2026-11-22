@@ -627,7 +627,7 @@ pub fn main_cli() -> i32 {
         return common::emit(la_startup_check::check(&a));
     }
     let root =
-        PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/uai-diffuser".into()));
+        PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/diffuser".into()));
     if let Some(fleet_worker_cfg) = common::opt(&a, "--fleet-worker") {
         return fleet::run_fleet_worker(Path::new(&fleet_worker_cfg));
     }

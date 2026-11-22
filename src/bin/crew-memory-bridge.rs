@@ -114,7 +114,7 @@ fn approved_memory_url(url: &str) -> Result<String> {
     use lane_router::transport::{is_loopback, private_http_url};
     let parsed = reqwest::Url::parse(url).map_err(|_| Failure(68, "memory_url_invalid"))?;
     if !private_http_url(&parsed)
-        || !(parsed.host_str() == Some("thaladex.united-ai.ca") || is_loopback(&parsed))
+        || !(parsed.host_str() == Some("thaladex.example") || is_loopback(&parsed))
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
@@ -796,7 +796,7 @@ fn explorer(a: &[String]) -> Result<Value> {
     let client = common::client()?;
     let r = client
         .get(format!(
-            "https://explorer.united-ai.ca/api/ai/context/{slug}"
+            "https://explorer.example/api/ai/context/{slug}"
         ))
         .bearer_auth(auth.as_str())
         .send()
@@ -844,15 +844,15 @@ mod tests {
     #[test]
     fn memory_url_requires_tls_for_the_approved_remote_host() {
         assert_eq!(
-            approved_memory_url("https://thaladex.united-ai.ca/").unwrap(),
-            "https://thaladex.united-ai.ca"
+            approved_memory_url("https://thaladex.example/").unwrap(),
+            "https://thaladex.example"
         );
         assert!(approved_memory_url("http://localhost:5820").is_ok());
         assert!(approved_memory_url("http://[::1]:5820").is_ok());
         for url in [
-            "http://thaladex.united-ai.ca",
-            "https://thaladex.united-ai.ca.example",
-            "https://user@thaladex.united-ai.ca",
+            "http://thaladex.example",
+            "https://thaladex.example.example",
+            "https://user@thaladex.example",
         ] {
             assert_eq!(approved_memory_url(url).unwrap_err().1, "memory_url_not_approved");
         }
