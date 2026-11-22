@@ -111,13 +111,9 @@ fn ledger(c: &Bridge) -> Result<rusqlite::Connection> {
     Ok(db)
 }
 fn approved_memory_url(url: &str) -> Result<String> {
-    use lane_router::transport::{is_loopback, private_http_url};
+    use lane_router::transport::private_http_url;
     let parsed = reqwest::Url::parse(url).map_err(|_| Failure(68, "memory_url_invalid"))?;
-    if !private_http_url(&parsed)
-        || !(parsed.host_str() == Some("thaladex.example") || is_loopback(&parsed))
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
+    if !private_http_url(&parsed) || parsed.query().is_some() || parsed.fragment().is_some() {
         return common::fail(68, "memory_url_not_approved");
     }
     Ok(parsed.as_str().trim_end_matches('/').into())
@@ -767,6 +763,18 @@ fn worthy(c: &Bridge, a: &[String]) -> Result<Value> {
         json!({"rules_note_citation":rules["citation"],"superseded_facts":["F1","F3"],"sealed_20261108_untouched":true,"notes_indexed_count":common::value(c.vault.join(".operator/notes-index.json"))?["rows"].as_array().unwrap().len()}),
     )
 }
+fn explorer_origin(url: &str) -> Result<String> {
+    use lane_router::transport::private_http_url;
+    let parsed = reqwest::Url::parse(url).map_err(|_| Failure(78, "explorer_auth_unavailable"))?;
+    if !private_http_url(&parsed)
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || (parsed.path() != "/" && !parsed.path().is_empty())
+    {
+        return common::fail(78, "explorer_auth_unavailable");
+    }
+    Ok(parsed.as_str().trim_end_matches('/').into())
+}
 fn explorer(a: &[String]) -> Result<Value> {
     let slug = a
         .get(1)
@@ -778,26 +786,30 @@ fn explorer(a: &[String]) -> Result<Value> {
     let raw = common::protected(Path::new("/etc/crew-wiki/explorer-read.env"), false)
         .map_err(|_| Failure(78, "explorer_auth_unavailable"))?;
     let mut auth = zeroize::Zeroizing::new(String::new());
+    let mut origin = None;
     for l in raw.lines() {
         if let Some((n, v)) = l.split_once('=') {
-            if n.trim().contains("EXPLORER")
-                && (n.trim().ends_with("_BEARER")
-                    || n.trim().ends_with("_TOKEN")
-                    || n.trim().ends_with("_AUTH"))
+            let name = n.trim();
+            let value = v.trim().trim_matches(['\'', '"']);
+            if auth.is_empty()
+                && name.contains("EXPLORER")
+                && (name.ends_with("_BEARER")
+                    || name.ends_with("_TOKEN")
+                    || name.ends_with("_AUTH"))
             {
-                *auth = v.trim().trim_matches(['\'', '"']).into();
-                break;
+                *auth = value.into();
+            } else if name == "EXPLORER_URL" {
+                origin = Some(value.to_string());
             }
         }
     }
     if auth.is_empty() {
         return common::fail(78, "explorer_auth_unavailable");
     }
+    let origin = explorer_origin(origin.as_deref().unwrap_or(""))?;
     let client = common::client()?;
     let r = client
-        .get(format!(
-            "https://explorer.example/api/ai/context/{slug}"
-        ))
+        .get(format!("{origin}/api/ai/context/{slug}"))
         .bearer_auth(auth.as_str())
         .send()
         .map_err(|_| Failure(78, "explorer_auth_unavailable"))?;
@@ -842,19 +854,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_url_requires_tls_for_the_approved_remote_host() {
+    fn memory_url_requires_tls_for_the_configured_remote_host() {
         assert_eq!(
-            approved_memory_url("https://thaladex.example/").unwrap(),
-            "https://thaladex.example"
+            approved_memory_url("https://memory.example/").unwrap(),
+            "https://memory.example"
+        );
+        assert_eq!(
+            approved_memory_url("https://other.example/export").unwrap(),
+            "https://other.example/export"
         );
         assert!(approved_memory_url("http://localhost:5820").is_ok());
         assert!(approved_memory_url("http://[::1]:5820").is_ok());
         for url in [
-            "http://thaladex.example",
-            "https://thaladex.example.example",
-            "https://user@thaladex.example",
+            "http://memory.example",
+            "https://user@memory.example",
+            "https://memory.example/?q=1",
+            "https://memory.example/#part",
         ] {
             assert_eq!(approved_memory_url(url).unwrap_err().1, "memory_url_not_approved");
+        }
+    }
+
+    #[test]
+    fn explorer_origin_keeps_the_context_path() {
+        assert_eq!(
+            explorer_origin("https://explorer.example").unwrap(),
+            "https://explorer.example"
+        );
+        assert_eq!(
+            explorer_origin("https://explorer.example:8443/").unwrap(),
+            "https://explorer.example:8443"
+        );
+        assert!(explorer_origin("http://127.0.0.1:9").is_ok());
+        for url in [
+            "",
+            "http://explorer.example",
+            "https://user@explorer.example",
+            "https://explorer.example/api/ai/context",
+            "https://explorer.example/?q=1",
+            "https://explorer.example/#part",
+        ] {
+            assert_eq!(
+                explorer_origin(url).unwrap_err().1,
+                "explorer_auth_unavailable"
+            );
         }
     }
 
