@@ -50,3 +50,10 @@ All six leads identified during the full high-effort pass were remediated and in
 - **Scope**: `adapters/colab/colab_weight_cache.sh`, `adapters/colab/tests/test_colab_weight_cache.py`, `adapters/gamer-idle/gamer_idle_guard.py`, `adapters/gamer-idle/config.example.json`, `adapters/gamer-idle/README.md`, and `adapters/gamer-idle/tests/test_gamer_idle_guard.py`.
 - **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`).
 - **Result**: `CLEAN_PASS` (`0` open confirmed findings, `0` open `needs_validation`, `32/32` unit tests passing in isolated `bwrap` sandbox, both Node validators exit `0`).
+
+## Windows Gamer-Idle Fleet Worker Delta Audit (2026-11-22)
+
+- **Scope**: `adapters/gamer-idle/windows_fleet_worker.py` and `adapters/gamer-idle/tests/test_windows_fleet_worker.py` (cross-platform Python 3 stdlib Diffuser worker with Diffuser v2 HMAC-SHA256 verification, bounded replay cache, loopback-only `BoundedHTTPServer`, and hardware AV1/HEVC/H.264 NVENC benchmark capability).
+- **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`), 2-iteration delta verification.
+- **Closed findings**: Loopback idle-connection thread exhaustion (replaced unbounded `ThreadingMixIn` with `BoundedHTTPServer` enforcing a bounded concurrency semaphore and finite socket read timeout with slot release on all completion/error paths).
+- **Result**: `CLEAN_PASS` (`0` open confirmed findings, `0` open `needs_validation`, `35/35` gamer-idle tests passing in isolated `bwrap` sandbox, both Node validators exit `0`).
