@@ -4,7 +4,6 @@ version = "0.3.0"
 edition = "2021"
 autotests = false
 license = "Apache-2.0"
-repository = "https://github.com/Gavinbombay/Diffuser"
 description = "Diffuser: scalable multi-worker CPU/CUDA resource router, typed SDK, CLI, and MCP fleet server."
 
 [dependencies]
@@ -29,7 +28,7 @@ name = "lane-router"
 path = "src/main.rs"
 
 [[bin]]
-name = "uai-diffuser"
+name = "diffuser"
 path = "src/main.rs"
 
 [[bin]]

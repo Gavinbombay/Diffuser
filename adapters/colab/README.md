@@ -33,7 +33,7 @@ done
 "$ctl" add-lane --config "$config" --lane training --gpus H100,G4,A100 \
   --forbid-gpus L4,T4 --max-seats 2 --max-cu 100 --max-walltime 21600 --parked
 "$ctl" list-lanes --config "$config"
-uai-diffuser --fleet-worker "$config"
+diffuser --fleet-worker "$config"
 ```
 
 Each lane publishes `colab.<lane>.exec/v1` unless you set `--capability`. Use `add-lane` again to update the profile or `remove-lane --config "$config" --lane <id>` to remove it. The worker reads its profiles when it starts. The original `colab_l4.py` and `colab_train.py` entrypoints still accept their existing requests and retain their original defaults.

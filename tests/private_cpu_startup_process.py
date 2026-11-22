@@ -1,4 +1,4 @@
-"""Process checks for the built uai-diffuser; invoke inside private namespaces."""
+"""Process checks for the built diffuser; invoke inside private namespaces."""
 
 import hashlib
 import http.client

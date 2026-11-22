@@ -19,7 +19,7 @@ Use this skill when adding a new machine, GPU, or tool (Blender, Whisper, Ollama
 3. **Establish Encrypted Tunnel (for remote LAN/laptop hosts)**
    - Run `ssh -N -L 127.0.0.1:<worker_port>:127.0.0.1:<worker_port> -R 127.0.0.1:5820:127.0.0.1:5820 <host>` so both worker enrollment/heartbeats and controller->worker RPC travel over SSH loopback.
 4. **Launch Worker & Verify Enrollment**
-   - Start `uai-diffuser --fleet-worker /path/to/fleet-worker.json`.
+   - Start `diffuser --fleet-worker /path/to/fleet-worker.json`.
    - Call `GET /v1/fleet/workers` (or MCP `fleet_list_workers`) and confirm `"alive": true, "accepting": true` with the expected GPU UUIDs and capabilities.
 5. **Run a Smoke Job**
    - Submit one idempotent smoke job via `POST /v1/fleet/jobs` (or MCP `fleet_submit_job`) and confirm `state == "succeeded"` and `capacity_released == true`.

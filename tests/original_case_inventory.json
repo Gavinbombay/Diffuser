@@ -1402,7 +1402,7 @@
         "tests::unix_socket_unavailable_is_typed"
       ]
     },
-    "uai-diffuser": {
+    "diffuser": {
       "src_path": "src/main.rs",
       "cases": [
         "agent_pull::authorization_tests::authorizes_every_offered_lane_in_order",
