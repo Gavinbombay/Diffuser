@@ -20,7 +20,7 @@ pub(crate) async fn h_agent_pull(
         let state_dir = a.compat["card_state_dir"]
             .as_str()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/mnt/sn850x/lanes/gpu-backlog"));
+            .unwrap_or_else(|| PathBuf::from("/var/lib/diffuser/gpu-backlog"));
         let snapshot = card_state::refresh(&state_dir, now);
         let card = &snapshot["colab-l4"];
         *a.cards.lock().unwrap() = snapshot.clone();

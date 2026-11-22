@@ -12,10 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from harness_accounting import AccountingError, acceptance, classify, expected_targets, unique_source_test_inventory
 
-VECTOR_IDS = ['real-legacy-accounting', 'real-native-identity', 'crew-memory-bridge-omitted', 'crew-memory-bridge-duplicate', 'crew-memory-bridge-failed', 'crew-memory-bridge-zero', 'crew-memory-bridge-ignored', 'lane-router-omitted', 'lane-router-duplicate', 'lane-router-failed', 'lane-router-zero', 'lane-router-ignored', 'lanes-ctl-omitted', 'lanes-ctl-duplicate', 'lanes-ctl-failed', 'lanes-ctl-zero', 'lanes-ctl-ignored', 'uai-diffuser-omitted', 'uai-diffuser-duplicate', 'uai-diffuser-failed', 'uai-diffuser-zero', 'uai-diffuser-ignored', 'lane-router-below-main-floor', 'uai-diffuser-below-main-floor', 'unknown-target', 'shared-source-not-deduped', 'quiet-production-output', 'spoof-order-size', 'metadata-failure', 'metadata-test-selection', 'nested-none-primary-inflation', 'nested-47', 'nested-48', 'nested-orphan', 'nested-duplicate-summary', 'nested-truncated', 'nested-interleaved', 'nested-count-mismatch', 'nested-bad-timing', 'nested-failed-child', 'nested-ignored-child', 'nested-zero-child', 'nested-unfiltered-child', 'pending-parent-pretty', 'primary-corpus-missing', 'coverage-fail', 'cargo-nonzero', 'input-drift', 'group-timing-fail', 'legacy-timing-selftests', 'legacy-suite-fixture', 'all-shipped-tool-fixtures', 'fresh-nonquiet-rerun']
+VECTOR_IDS = ['real-legacy-accounting', 'real-native-identity', 'lane-router-omitted', 'lane-router-duplicate', 'lane-router-failed', 'lane-router-zero', 'lane-router-ignored', 'lanes-ctl-omitted', 'lanes-ctl-duplicate', 'lanes-ctl-failed', 'lanes-ctl-zero', 'lanes-ctl-ignored', 'diffuser-omitted', 'diffuser-duplicate', 'diffuser-failed', 'diffuser-zero', 'diffuser-ignored', 'lane-router-below-main-floor', 'diffuser-below-main-floor', 'unknown-target', 'shared-source-not-deduped', 'quiet-production-output', 'spoof-order-size', 'metadata-failure', 'metadata-test-selection', 'nested-none-primary-inflation', 'nested-47', 'nested-48', 'nested-orphan', 'nested-duplicate-summary', 'nested-truncated', 'nested-interleaved', 'nested-count-mismatch', 'nested-bad-timing', 'nested-failed-child', 'nested-ignored-child', 'nested-zero-child', 'nested-unfiltered-child', 'pending-parent-pretty', 'primary-corpus-missing', 'coverage-fail', 'cargo-nonzero', 'input-drift', 'group-timing-fail', 'legacy-timing-selftests', 'legacy-suite-fixture', 'all-shipped-tool-fixtures', 'fresh-nonquiet-rerun']
 
-NAMES = ("crew-memory-bridge", "lane-router", "lanes-ctl", "uai-diffuser")
-COUNTS = dict(zip(NAMES, (5, 1377, 4, 1377)))
+NAMES = ("lane-router", "lanes-ctl", "diffuser")
+COUNTS = dict(zip(NAMES, (1377, 4, 1377)))
 
 def metadata(root):
     """Synthetic metadata, with paths explicitly bound to this fixture's root."""
@@ -27,7 +27,7 @@ def transcript(root, target, counts=None, children=48):
     counts = counts or COUNTS
     blocks = {}
     for name in NAMES:
-        path = "src/main.rs" if name in ("lane-router", "uai-diffuser") else "src/bin/" + name + ".rs"
+        path = "src/main.rs" if name in ("lane-router", "diffuser") else "src/bin/" + name + ".rs"
         lines = [f"     Running unittests {path} ({target}/debug/deps/{name.replace('-', '_')}-0123456789abcdef)", f"running {counts[name]} tests"]
         for i in range(counts[name]):
             case = ("main" if path == "src/main.rs" else name.replace('-', '_')) + f"_{i}"
@@ -70,17 +70,17 @@ def run():
                 suffix = "FAILED" if mutation == "failed" else "ignored"
                 status_field = "failed" if mutation == "failed" else "ignored"
                 # Change an ordinary case, never a nested child.
-                case = ("main" if name in ("lane-router", "uai-diffuser") else name.replace('-', '_')) + "_" + str(COUNTS[name]-1)
+                case = ("main" if name in ("lane-router", "diffuser") else name.replace('-', '_')) + "_" + str(COUNTS[name]-1)
                 b[name] = b[name].replace(f"test {case} ... ok", f"test {case} ... {suffix}")
                 b[name] = b[name].replace(f"{COUNTS[name]} passed; 0 failed; 0 ignored", f"{COUNTS[name]-1} passed; " + ("1 failed; 0 ignored" if status_field == "failed" else "0 failed; 1 ignored"))
                 if mutation == "failed":
                     pos = b[name].rfind("test result: ok.")
                     b[name] = b[name][:pos] + b[name][pos:].replace("test result: ok.", "test result: FAILED.", 1)
             check(name + "-" + mutation, rejected(chunks(b)), mutation + " target rejected")
-    for name in ("lane-router", "uai-diffuser"):
+    for name in ("lane-router", "diffuser"):
         counts = COUNTS.copy(); counts[name] = 1234
         check(name + "-below-main-floor", rejected(chunks(transcript(root,target,counts))), "1234 rejected independently")
-    check("unknown-target", rejected(text.replace("crew_memory_bridge-0123456789abcdef", "alien-0123456789abcdef", 1)), "unknown artifact rejected")
+    check("unknown-target", rejected(text.replace("lanes_ctl-0123456789abcdef", "alien-0123456789abcdef", 1)), "unknown artifact rejected")
     check("shared-source-not-deduped", len(base["primary_targets"]) == 4 and len(unique_source_test_inventory(base)) == 1386, "both shared-source targets retained")
     check("quiet-production-output", rejected(re.sub(r"^ *Running .*\n", "", text, flags=re.M)), "anonymous targets rejected")
     check("spoof-order-size", rejected(text.replace("src/bin/lanes-ctl.rs", "src/main.rs", 1)), "source/artifact mismatch rejected")
@@ -106,8 +106,8 @@ def run():
     interrupted = text.replace("test main_0 ...\n", "test main_0 ... policy_sha256=fixture\n", 1)
     check("pending-parent-pretty", not rejected(interrupted), "diagnostic and terse child preserve pending parent")
     # Review regressions, exercised separately from the authored vector list.
-    probes = [text.replace("test crew_memory_bridge_0 ... ok", "test crew_memory_bridge_0 ... FAILED", 1),
-              text.replace("test crew_memory_bridge_1 ... ok", "test crew_memory_bridge_0 ... ok", 1),
+    probes = [text.replace("test lanes_ctl_0 ... ok", "test lanes_ctl_0 ... FAILED", 1),
+              text.replace("test lanes_ctl_1 ... ok", "test lanes_ctl_0 ... ok", 1),
               text.replace(child + "\nok", child + "\nok\nok", 1),
               text.replace(child, child.replace(".\n", "", 1), 1),
               text.replace(child, child.replace(".\n", ".....\n", 1), 1),
@@ -126,8 +126,8 @@ def run():
     suite = runpy.run_path(str(ROOT / "tools/test-suite.py"))
     original = json.loads((ROOT / 'tests/original_case_inventory.json').read_text())['targets']
     complete = [{'name': n, 'result': 'ok'} for n in original['lane-router']['cases']]
-    by_target = suite['per_target_corpus']('', {'lane-router': {'cases': complete}, 'uai-diffuser': {'cases': []}})
-    check("primary-corpus-missing", all(not v['missing_tests'] for v in by_target['lane-router'].values()) and all(v['missing_tests'] for v in by_target['uai-diffuser'].values()), "one main cannot mask the other's missing corpus")
+    by_target = suite['per_target_corpus']('', {'lane-router': {'cases': complete}, 'diffuser': {'cases': []}})
+    check("primary-corpus-missing", all(not v['missing_tests'] for v in by_target['lane-router'].values()) and all(v['missing_tests'] for v in by_target['diffuser'].values()), "one main cannot mask the other's missing corpus")
     for ident, kwargs in [("coverage-fail", {'coverage_result':'FAIL'}), ("cargo-nonzero", {'cargo_status':1}), ("input-drift", {'unchanged':False}), ("group-timing-fail", {'timing_result':'FAIL'})]:
         check(ident, rejected(text, **kwargs), "acceptance predicate rejected")
     def invoke(args):
@@ -155,9 +155,9 @@ def run():
         stdout_path = os.environ.get('HARNESS_NATIVE_STDOUT')
         assert stderr_path and stdout_path, 'explicit original native streams required'
         stderr = Path(stderr_path).read_text(errors='replace'); stdout = Path(stdout_path).read_text(errors='replace')
-        for stem in ('crew_memory_bridge', 'lane_router', 'lanes_ctl', 'uai_diffuser'):
+        for stem in ('lane_router', 'lanes_ctl', 'diffuser'):
             assert re.search(r'Running unittests .*?/deps/' + stem + r'-[0-9a-f]{16}\)', stderr)
-        assert sorted(g['passed'] for g in groups)==[4,5,1377,1377] and sum(g['passed'] for g in data['all_groups'] if g['depth']>0)==140
+        assert sorted(g['passed'] for g in groups)==[4,1377,1377] and sum(g['passed'] for g in data['all_groups'] if g['depth']>0)==140
         assert len(re.findall(r'^test result:', stdout, re.M)) == 144
         results['real-native-identity']={'outcome':'PASS','provenance':'REAL_SEPARATE_STREAMS_INVENTORY','detail':'original streams inspected separately and corroborated with parsed inventory; not reconstructed'}
     else: results['real-native-identity']={'outcome':'PENDING','provenance':'REAL_CAPTURE','detail':'HARNESS_NATIVE_INVENTORY not supplied'}

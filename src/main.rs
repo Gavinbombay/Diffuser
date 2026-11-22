@@ -119,7 +119,7 @@ fn main() {
     if std::env::args().next().is_some_and(|p| {
         std::path::Path::new(&p)
             .file_name()
-            .is_some_and(|n| n == "uai-diffuser")
+            .is_some_and(|n| n == "diffuser")
     }) {
         std::process::exit(cosp::main_cli());
     }

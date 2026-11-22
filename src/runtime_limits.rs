@@ -14,7 +14,7 @@ pub const VIDEO_FRAMES_MIN: u64 = 2; // unit: frames
 pub const VIDEO_FRAMES_MAX: u64 = 480; // unit: frames
 pub const SAMPLE_RATES: &[u64] = &[16000, 22050, 24000, 44100, 48000]; // unit: hertz
 
-#[cfg(test)]
+#[cfg(all(test, feature = "contract-docs"))]
 #[path = "runtime_limit_docs.rs"]
 mod doc_tests;
 

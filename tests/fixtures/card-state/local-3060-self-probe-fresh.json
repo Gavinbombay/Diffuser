@@ -1,7 +1,7 @@
 {
  "schema_version": "card-state/v1",
- "card": "echo-3060",
- "worker_id": "echo-3060",
+ "card": "local-3060",
+ "worker_id": "local-3060",
  "ts": "2026-10-31T12:40:00-02:30",
  "epoch": 1793459400,
  "state": "idle",
@@ -16,7 +16,7 @@
   "ace-step"
  ],
  "capacity": {
-  "source": "nvidia-smi-ssh-echo-gpu",
+  "source": "nvidia-smi-ssh-local-gpu",
   "at": "2026-10-31T12:40:00-02:30",
   "unknown": []
  },
@@ -26,7 +26,7 @@
  },
  "proof_source": "self-probe",
  "self_probe": {
-  "worker_id": "echo-3060",
+  "worker_id": "local-3060",
   "epoch": 1793459370,
   "util": 0,
   "watts": 16.2,

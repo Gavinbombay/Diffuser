@@ -1,1 +1,1 @@
-{"area":"dispatch","cites":["kinds/s03/dispatch.py:703-711","kinds/S03-REF.md:66-69"],"expect":{"name":"warp-2070"},"id":"dsp-part-single","input":{"job":{"frames":"48"},"worker_id":"warp-2070"},"note":"a single number is not a range","op":"part_name","source":"kinds/s03/dispatch.py:703"}
+{"area":"dispatch","cites":["kinds/s03/dispatch.py:703-711","kinds/S03-REF.md:66-69"],"expect":{"name":"local-2070"},"id":"dsp-part-single","input":{"job":{"frames":"48"},"worker_id":"local-2070"},"note":"a single number is not a range","op":"part_name","source":"kinds/s03/dispatch.py:703"}

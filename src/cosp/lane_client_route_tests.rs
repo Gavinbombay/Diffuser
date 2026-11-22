@@ -187,6 +187,7 @@ type ResponseEdit =
     dyn Fn(&mut WireResponse) -> std::result::Result<(), TransportError> + Send + Sync;
 
 #[derive(Clone)]
+#[cfg_attr(not(feature = "contract-docs"), allow(dead_code))]
 struct Recorded {
     method: Method,
     path: String,
@@ -902,6 +903,7 @@ async fn upload_and_acquire(
     (artifact.object_id, assignment.assignment_id)
 }
 
+#[cfg(feature = "contract-docs")]
 #[tokio::test]
 async fn sdk_v2_cpu_lost_reply_reconnects_and_verifies_once() {
     let fixture = Fixture::with_backend(Some(true), true);
@@ -1523,6 +1525,7 @@ async fn job_refusals_preserve_auth_order_and_do_not_fall_back_to_revision_one()
     );
 }
 
+#[cfg(feature = "contract-docs")]
 #[tokio::test]
 async fn frozen_v1_golden_transcript_matches_actual_cpu_workflow() {
     let golden: Value =
@@ -1692,6 +1695,7 @@ async fn frozen_v1_golden_transcript_matches_actual_cpu_workflow() {
     println!("{}", serde_json::to_string(&captured).unwrap());
 }
 
+#[cfg(feature = "contract-docs")]
 fn wire_row(row: &Recorded, ids: &[(&Id, &str)]) -> Value {
     let normalize = |text: &str| {
         ids.iter().fold(text.to_owned(), |text, (id, label)| {

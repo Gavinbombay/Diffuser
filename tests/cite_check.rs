@@ -101,7 +101,7 @@ fn cite_check_real_fold_documents() {
     let root = root();
     let accepted = std::env::var_os("LANE_ACCEPTED_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("../../../mnt/sn850x/lanes-inbox/accepted"));
+        .unwrap_or_else(|| root.join("../../../srv/lanes-inbox/accepted"));
     let mut total = 0;
     let mut skipped = 0;
     assert!(
@@ -208,7 +208,7 @@ fn strict_check(
         Err(failures)
     }
 }
-// Reference roots (spine r5 same-job resume, Kraydence 2026-11-13 14:55 NST): one env root,
+// Reference roots (spine r5 same-job resume): one env root,
 // default the custodian read-only tree. accepted = $ROOT/accepted, vendor = $ROOT/vendor-src/codex-8801b9a8a6c6.
 fn refs_root() -> PathBuf {
     std::env::var_os("DIFFUSER_REFS_ROOT")
@@ -272,7 +272,7 @@ fn run28_planted_bad_cites_name_every_failure() {
     );
     fs::remove_dir_all(root).unwrap();
 }
-// RETIRED-UNRECOVERABLE (DIV-010, Kraydence 2026-11-13 14:55 NST): the fold build log behind the one
+// RETIRED-UNRECOVERABLE (DIV-010): the fold build log behind the one
 // FOLD-NOTES cite of target/run31-startup.log (sha256 2470caa8a6d7) is gone; it is never regenerated.
 // The marker must stay in FOLD-NOTES.md and the path must never come back as a live cite.
 #[test]

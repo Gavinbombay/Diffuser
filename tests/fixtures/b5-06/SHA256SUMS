@@ -1,4 +1,4 @@
-8a68b50b72a8c067e0a56b110508b4cf64d061a15153e96875fac20e55e2cfc5  MANIFEST.json
+3008094ad1be33761db1cecfe5b889ed9082974f6d8111748116a219778d56ba  MANIFEST.json
 4d2f3f49d570d55a9545255829281b433a5571df759140a9180910bd7d77679a  cases/adm-dupkey-nested.json
 634b84ac4361150fa9ceaef51c2a2c1543de5220cc6690528d0d0d20da2cffec  cases/adm-empty-body.json
 427cc354e5b5bd69af528ac291f50434c1dcf874d014a224500d28df20b25f8f  cases/adm-jobid-honored.json
@@ -45,9 +45,9 @@ f1fed54b18c8a9d2add6a09201aa66101ecb86cbe3bab2277d81053ffa7d0c7a  cases/dsp-map-
 9dab66c6e59f4105f0c00c0a08b45bbc79650dbedd756824705618f34687d405  cases/dsp-map-rc2-predispatch.json
 44713d5a1acde051788ed3fb520245ddaa91151523f031e14c532182954361d2  cases/dsp-map-reason-not-slug.json
 934fc6b1e1ee56cfaa4f6ad5587fb64d39f091fb9d47825789e8f401bedf1219  cases/dsp-map-result-doc.json
-a153a3f6e76199f460bf681083d213e46faf407fd64430b5abb1adbcde7c9636  cases/dsp-part-range.json
-5eab809e7aa5bd0a75a1793239357a4961d0ce28b2f76bca32e457509efb1c49  cases/dsp-part-single.json
-1ad00e0f5d5dc7719e4d03e3a79b7dd7eaa402552daf80a68fc19c0482a51646  cases/dsp-part-unchunked.json
+6896af1aeec6e084f60a6dfe8fcf5a037ff9d2b583de7af87246278710f5a8d5  cases/dsp-part-range.json
+bb4b02bad9a57c3644ef99d4192dd77af2932cd21deea2dbca373697711d10bd  cases/dsp-part-single.json
+40aa894d324149f16f7ebe96127a5f0d67dd297bd3955a27a261cb2e3aee0585  cases/dsp-part-unchunked.json
 188967e8b9a12f01c63c605cda272f3bd99a7eb9ea765dffe0837a179b6ccec9  cases/dsp-rcstate-0.json
 2c89d8e69301fb577b926e854651de3cca96812210f9103571219aae079159ec  cases/dsp-rcstate-1.json
 7d18d9c5a87d9d8e83d90eb1bf973d0ed182215b709aeacbcc98b975a70df734  cases/dsp-rcstate-124.json
@@ -55,7 +55,7 @@ f35abef0acf19d65753f015194146ef50d91350a4793588da6316253875db102  cases/dsp-rcst
 bc55717a7a2e433c24027cc9a83aece731fa32ec933037c21ecfc038376b891f  cases/dsp-rundir-absent.json
 865f1b5ff3066082efc1841e08f5084f144f531064313c7f9901a951db5aee91  cases/dsp-rundir-nonempty.json
 b0c810cecf20a3571aee4b8f417b423227486196926877a43429b860b903325a  cases/dsp-spec-no-out.json
-586b86f2e9a46c3c969b201e4748b238894cf5733b99025b5796887c8cf48658  cases/dsp-spec-out-narrowed.json
+a039112cf238669ad75a3a195b99bbba1c9c46c437e8633c56afb2b4637d0088  cases/dsp-spec-out-narrowed.json
 4d45bda5ae0bfac21cd486c1204cd153eb5c69b4e8d6c13a45e9892e1f40d230  cases/dsp-verify-bad-sums-line.json
 f44335e00655ddfbf2553a9c09ec78ecb0cfb3b072e6ecbd258f02ffccbda808  cases/dsp-verify-bookkeeping-skipped.json
 a08bd3eae935bc661dc81ae76eb6a658efc59774ecd605465640ca6f042a6890  cases/dsp-verify-empty-artifact.json
@@ -131,9 +131,9 @@ f8164383b9bd72e43cf2b27661966182a4664575f9c974644fb3360220abfd22  cases/lim-rl-s
 d9958db178ae49f5a1a72e37625becc7571dd5aef99b7ad7a981002e6c3dd4a4  cases/lim-rl-stt-input-not-output.json
 6e2065625a0ef76c39dfc78750be37ea51ef35c04decd5961817bafbe4d5c34e  cases/lim-rl-stt-unreadable.json
 83a57a920ae93fd7659c8bfa6b374332cf072a53577ee2bcb151f8b4586b3ff3  cases/lim-rl-stt-wav-not-measured.json
-f9c944f8786e3ceb440a96452b6ff3bdbe5da1fa628a4823e1678eba28813baf  cases/lim-rl-tts-done-300.json
+1cd8343631e8781cebfaefe5a82720630cd48b81a085dc26534f1d2d4308f113  cases/lim-rl-tts-done-300.json
 efcfed26c73a4c6d659530da200c73ffadf36cd69e626f31d7dadc6eace122f7  cases/lim-rl-tts-done-record-60.json
-abd76e8118de4d72d57aafc80d3a4f71483a35086a10cae601488d98f8aaef19  cases/lim-rl-tts-done-second-wav.json
+778ce57e5995b5092fb121e4e7c5a11c66730cda98e295a7b03691ff26516363  cases/lim-rl-tts-done-second-wav.json
 a6faec108452c085897f2bf751be5225889cd249800936b87927820a87101442  cases/lim-rl-tts-empty-merge.json
 433486906e20ef3d437fc14c35cf049b4c00735474467f4fedf8e882c102f43d  cases/lim-rl-tts-empty.json
 7978a9661ff6417d99ee1ee6e62a8c0ceca952466fdcb8882a079510994cbd87  cases/lim-rl-tts-hash-bytes.json
@@ -153,7 +153,7 @@ dc426b5d7472e53555bca9bed65a1cb6340730f8ceeebca15e57ba2ccd35ea9d  cases/lim-s05-
 d03151bad08ee59f239e3839269e734c8e9b190a5ce2c18618999d73896dc459  cases/lim-s05-music-one-sample-over.json
 2b255a6a37938839fcf69ceb233c00a74a853f4349930cfbb5d8c2334fceca37  cases/lim-s05-music-stem-over.json
 7f516dd59e29ff79ac38e8e93d98a8b88cd0c9b7db16a4f63bb313c494458888  cases/lim-s05-music-zero-length.json
-bfcfe061912ee3d0b54285aaa3d0efc444a3930db53805f2726867599b8b7dd0  cases/lim-s05-tts-at-ceiling.json
+54a6e184996a659aaf84efa4ddc014d46b870c1b8ff9ce9856e8f0f13caccecd  cases/lim-s05-tts-at-ceiling.json
 4aba2a40787f7aeff7c5b895f5932f2acb87c26f1362e0d1e1eb0dd1d6856ce1  cases/lim-s05-tts-bad-header-fmt.json
 5aca3dbee6d515ba3b8e1e11650a49b604ad2bf9fb504d69c8f561435e72b812  cases/lim-s05-tts-bad-header.json
 ae56f612dfd9cf8dab2ea91520d823eb7342958f5e4edb98008db18b51979582  cases/lim-s05-tts-hash-mismatch-sha.json

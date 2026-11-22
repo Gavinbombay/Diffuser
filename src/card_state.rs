@@ -3,8 +3,8 @@ use std::{collections::HashMap, path::Path, sync::OnceLock};
 
 const CARDS: [(&str, &str); 3] = [
     ("colab-l4", "colab-l4-state.json"),
-    ("echo-3060", "cards/echo-3060.json"),
-    ("warp-2070", "cards/warp-2070.json"),
+    ("local-3060", "cards/local-3060.json"),
+    ("local-2070", "cards/local-2070.json"),
 ];
 
 fn validator() -> &'static jsonschema::Validator {
@@ -24,7 +24,7 @@ pub(crate) fn proof(
     now: u64,
     probe: Option<&Value>,
 ) -> Result<&'static str, &'static str> {
-    if state["card"] == "echo-3060" {
+    if state["card"] == "local-3060" {
         let p = state.get("self_probe").ok_or_else(|| {
             crate::error_catalog::reason(crate::error_catalog::SELF_PROBE_MISSING)
         })?;
@@ -45,7 +45,7 @@ pub(crate) fn proof(
         ));
     }
     let card = state["card"].as_str().unwrap_or("");
-    let source = if card == "echo-3060" {
+    let source = if card == "local-3060" {
         "self-probe"
     } else {
         "router-probe"
@@ -135,7 +135,7 @@ pub(crate) fn annotate_proof(
     now: u64,
     probe: Option<&Value>,
 ) {
-    let source = if state["card"] == "echo-3060" {
+    let source = if state["card"] == "local-3060" {
         "self-probe"
     } else {
         "router-probe"
@@ -242,7 +242,7 @@ mod tests {
             "stale",
             "future",
         ];
-        let (base, probe, now) = warp_proof_fixture();
+        let (base, probe, now) = local_proof_fixture();
         let mut evidence = Vec::new();
         for previous in states
             .into_iter()
@@ -267,14 +267,14 @@ mod tests {
                     serde_json::to_vec(&incoming).unwrap()
                 };
                 let rows = refresh_with(now, |path| {
-                    if path.ends_with("cards/warp-2070.json") && event != "missing" {
+                    if path.ends_with("cards/local-2070.json") && event != "missing" {
                         Ok(bytes.clone())
                     } else {
                         Err(std::io::ErrorKind::NotFound.into())
                     }
                 });
                 let mut row = json!({"state":previous,"accepting":true,"why_not":[]});
-                apply(&mut row, &rows["warp-2070"]);
+                apply(&mut row, &rows["local-2070"]);
                 let invalid = matches!(event, "invalid" | "malformed" | "missing");
                 let expected = if invalid {
                     crate::error_catalog::STATE_UNREADABLE
@@ -291,7 +291,7 @@ mod tests {
                     assert!(!validator().is_valid(&incoming));
                 } else if matches!(event, "stale" | "future") {
                     assert_eq!(
-                        snapshot_proof(&rows["warp-2070"], Some("warp-2070"), now, Some(&probe)),
+                        snapshot_proof(&rows["local-2070"], Some("local-2070"), now, Some(&probe)),
                         Err(crate::error_catalog::STALE_STATE)
                     );
                     assert_eq!(row["stale"], true);
@@ -312,12 +312,12 @@ mod tests {
     }
     #[test]
     fn proof_valid_registered_probe_match_proved() {
-        let (state, probe, now) = warp_proof_fixture();
+        let (state, probe, now) = local_proof_fixture();
         assert_eq!(proof(&state, true, now, Some(&probe)), Ok("router-probe"));
     }
     #[test]
     fn proof_schema_invalid_unregistered_stale_mismatch_not_proved() {
-        let (mut state, mut probe, now) = warp_proof_fixture();
+        let (mut state, mut probe, now) = local_proof_fixture();
         assert_eq!(
             proof(&state, false, now, Some(&probe)),
             Err(crate::error_catalog::UNREGISTERED_WORKER)
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn self_probe_fresh_proved_stale_121s_and_worker_mismatch_not() {
         let mut state: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/echo-3060-self-probe-fresh.json"
+            "../tests/fixtures/card-state/local-3060-self-probe-fresh.json"
         ))
         .unwrap();
         let epoch = state["self_probe"]["epoch"].as_u64().unwrap();
@@ -355,9 +355,9 @@ mod tests {
             Err(crate::error_catalog::SELF_PROBE_WORKER_MISMATCH)
         );
     }
-    fn warp_proof_fixture() -> (Value, Value, u64) {
+    fn local_proof_fixture() -> (Value, Value, u64) {
         let state: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/warp-2070.json"
+            "../tests/fixtures/card-state/local-2070.json"
         ))
         .unwrap();
         let now = state["epoch"].as_u64().unwrap();
@@ -366,7 +366,7 @@ mod tests {
     }
     #[test]
     fn router_probe_at_120_seconds_is_valid() {
-        let (state, probe, now) = warp_proof_fixture();
+        let (state, probe, now) = local_proof_fixture();
         assert_eq!(
             proof(&state, true, now + 120, Some(&probe)),
             Ok("router-probe")
@@ -374,13 +374,13 @@ mod tests {
     }
     #[test]
     fn future_router_probe_is_refused() {
-        let (state, mut probe, now) = warp_proof_fixture();
+        let (state, mut probe, now) = local_proof_fixture();
         probe["epoch"] = json!(now + 1);
         assert_eq!(proof(&state, true, now, Some(&probe)), Err("stale-probe"));
     }
     #[test]
     fn missing_router_probe_is_refused() {
-        let (state, _, now) = warp_proof_fixture();
+        let (state, _, now) = local_proof_fixture();
         assert_eq!(
             proof(&state, true, now, None),
             Err(crate::error_catalog::PROBE_MISSING)
@@ -388,7 +388,7 @@ mod tests {
     }
     #[test]
     fn router_probe_watts_mismatch_is_refused() {
-        let (state, mut probe, now) = warp_proof_fixture();
+        let (state, mut probe, now) = local_proof_fixture();
         probe["watts"] = json!(999);
         assert_eq!(
             proof(&state, true, now, Some(&probe)),
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn colab_proof_rejects_wrong_card() {
         let (mut state, now) = fresh_colab();
-        state["card"] = json!("warp-2070");
+        state["card"] = json!("local-2070");
         assert_eq!(
             colab_proof(&state, Some("colab-l4"), now),
             Err(crate::error_catalog::WORKER_MISMATCH)
@@ -474,15 +474,15 @@ mod tests {
         let rows = refresh(&dir, now);
         let probe = json!({"epoch":now,"util":state["util"],"watts":state["watts"]});
         assert_eq!(
-            snapshot_proof(&rows["warp-2070"], Some("warp-2070"), now, Some(&probe)),
+            snapshot_proof(&rows["local-2070"], Some("local-2070"), now, Some(&probe)),
             Ok("router-probe")
         );
         assert_eq!(
-            snapshot_proof(&rows["warp-2070"], Some("echo-3060"), now, Some(&probe)),
+            snapshot_proof(&rows["local-2070"], Some("local-3060"), now, Some(&probe)),
             Err(crate::error_catalog::UNREGISTERED_WORKER)
         );
         assert_eq!(
-            snapshot_proof(&rows["warp-2070"], None, now, Some(&probe)),
+            snapshot_proof(&rows["local-2070"], None, now, Some(&probe)),
             Err(crate::error_catalog::UNREGISTERED_WORKER)
         );
     }
@@ -492,11 +492,11 @@ mod tests {
         let now = state["epoch"].as_u64().unwrap() + 181;
         let rows = refresh(&dir, now);
         assert_eq!(
-            snapshot_proof(&rows["warp-2070"], Some("warp-2070"), now, None),
+            snapshot_proof(&rows["local-2070"], Some("local-2070"), now, None),
             Err(crate::error_catalog::STALE_STATE)
         );
         assert_eq!(
-            snapshot_proof(&rows["echo-3060"], Some("echo-3060"), now, None),
+            snapshot_proof(&rows["local-3060"], Some("local-3060"), now, None),
             Err(crate::error_catalog::STALE_STATE)
         );
     }
@@ -509,15 +509,15 @@ mod tests {
         let mut row = json!({"accepting":false});
         annotate_proof(
             &mut row,
-            &rows["warp-2070"],
-            Some("warp-2070"),
+            &rows["local-2070"],
+            Some("local-2070"),
             now,
             Some(&probe),
         );
         assert_eq!(row["proved"], true);
         assert_eq!(row["proof_source"], "router-probe");
         assert_eq!(row["accepting"], false);
-        annotate_proof(&mut row, &rows["warp-2070"], None, now, Some(&probe));
+        annotate_proof(&mut row, &rows["local-2070"], None, now, Some(&probe));
         assert_eq!(row["proved"], false);
         assert_eq!(
             row["proof_reason"],
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn proof_requires_registered_matching_fresh_probe() {
         let state: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/warp-2070.json"
+            "../tests/fixtures/card-state/local-2070.json"
         ))
         .unwrap();
         let now = state["epoch"].as_u64().unwrap();
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn self_probe_requires_identity_freshness_and_matching_values() {
         let mut state: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/echo-3060-self-probe-fresh.json"
+            "../tests/fixtures/card-state/local-3060-self-probe-fresh.json"
         ))
         .unwrap();
         let now = state["epoch"].as_u64().unwrap();
@@ -576,7 +576,7 @@ mod tests {
             proof(&state, true, now, None),
             Err(crate::error_catalog::SELF_PROBE_WORKER_MISMATCH)
         );
-        state["self_probe"]["worker_id"] = json!("echo-3060");
+        state["self_probe"]["worker_id"] = json!("local-3060");
         state["self_probe"]["watts"] = json!(999);
         assert_eq!(
             proof(&state, true, now, None),
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn missing_self_probe_is_not_proof() {
         let mut state: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/echo-3060-self-probe-fresh.json"
+            "../tests/fixtures/card-state/local-3060-self-probe-fresh.json"
         ))
         .unwrap();
         let now = state["epoch"].as_u64().unwrap();
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn future_self_probe_is_not_proof() {
         let mut state: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/echo-3060-self-probe-fresh.json"
+            "../tests/fixtures/card-state/local-3060-self-probe-fresh.json"
         ))
         .unwrap();
         let now = state["epoch"].as_u64().unwrap();
@@ -617,16 +617,16 @@ mod tests {
         ));
         crate::private_state::fixture_dir(&dir);
         crate::private_state::fixture_dir(&dir.join("cards"));
-        let bytes = include_bytes!("../tests/fixtures/card-state/warp-2070.json");
-        crate::private_state::fixture_file(&dir.join("cards/warp-2070.json"), bytes);
+        let bytes = include_bytes!("../tests/fixtures/card-state/local-2070.json");
+        crate::private_state::fixture_file(&dir.join("cards/local-2070.json"), bytes);
         (dir, serde_json::from_slice(bytes).unwrap())
     }
     #[test]
     fn fresh_valid_card_stored() {
         let (dir, v) = fixture();
         let rows = refresh(&dir, v["epoch"].as_u64().unwrap());
-        assert_eq!(rows["warp-2070"]["util"], 3);
-        assert_eq!(rows["warp-2070"]["stale"], false);
+        assert_eq!(rows["local-2070"]["util"], 3);
+        assert_eq!(rows["local-2070"]["stale"], false);
     }
     #[test]
     fn colab_sample_validates_and_stores_class() {
@@ -643,10 +643,10 @@ mod tests {
         let (dir, v) = fixture();
         let epoch = v["epoch"].as_u64().unwrap();
         assert_eq!(
-            refresh(&dir, epoch + 179)["warp-2070"]["stale"],
+            refresh(&dir, epoch + 179)["local-2070"]["stale"],
             false
         );
-        let stale = &refresh(&dir, epoch + 181)["warp-2070"];
+        let stale = &refresh(&dir, epoch + 181)["local-2070"];
         assert_eq!(stale["stale"], true);
         assert_eq!(stale["util"], "unknown");
     }
@@ -654,23 +654,23 @@ mod tests {
     fn missing_state_unreadable() {
         let (dir, v) = fixture();
         assert_eq!(
-            refresh(&dir, v["epoch"].as_u64().unwrap())["echo-3060"]["state"],
+            refresh(&dir, v["epoch"].as_u64().unwrap())["local-3060"]["state"],
             crate::error_catalog::STATE_UNREADABLE
         );
     }
     #[test]
     fn malformed_and_schema_invalid_unreadable() {
         let (dir, mut v) = fixture();
-        let path = dir.join("cards/warp-2070.json");
+        let path = dir.join("cards/local-2070.json");
         fs::write(&path, b"{").unwrap();
         assert_eq!(
-            refresh(&dir, 0)["warp-2070"]["state"],
+            refresh(&dir, 0)["local-2070"]["state"],
             crate::error_catalog::STATE_UNREADABLE
         );
         v["schema_version"] = json!("other");
         fs::write(path, serde_json::to_vec(&v).unwrap()).unwrap();
         assert_eq!(
-            refresh(&dir, 0)["warp-2070"]["state"],
+            refresh(&dir, 0)["local-2070"]["state"],
             crate::error_catalog::STATE_UNREADABLE
         );
     }
@@ -679,7 +679,7 @@ mod tests {
         let (dir, v) = fixture();
         let rows = refresh(&dir, v["epoch"].as_u64().unwrap());
         let mut row = json!({"accepting":true,"why_not":[]});
-        apply(&mut row, &rows["warp-2070"]);
+        apply(&mut row, &rows["local-2070"]);
         for field in [
             "util",
             "watts",
@@ -796,7 +796,7 @@ mod run35_u3 {
         let schema: Value = serde_json::from_str(include_str!("card-state.schema.json")).unwrap();
         assert_eq!(parity(&schema), Ok(()));
         let mut sample: Value = serde_json::from_slice(include_bytes!(
-            "../tests/fixtures/card-state/warp-2070.json"
+            "../tests/fixtures/card-state/local-2070.json"
         ))
         .unwrap();
         for state in WriterState::ALL {

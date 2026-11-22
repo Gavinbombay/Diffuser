@@ -101,8 +101,8 @@ pub fn body(spec: &Value) -> Result<(), &'static str> {
         .as_str()
         .ok_or_else(|| crate::error_catalog::reason(crate::error_catalog::BAD_SPEC))?;
     if !out.starts_with('/')
-        || out == "/mnt/warp-preserve"
-        || out.starts_with("/mnt/warp-preserve/")
+        || out == "/mnt/gpu-preserve"
+        || out.starts_with("/mnt/gpu-preserve/")
     {
         return Err(crate::error_catalog::reason(crate::error_catalog::BAD_SPEC));
     }
@@ -737,8 +737,8 @@ mod tests {
     fn test_shapes() {
         for (field, v) in [
             ("engine", json!("eevee")),
-            ("out", json!("/mnt/warp-preserve")),
-            ("out", json!("/mnt/warp-preserve/x")),
+            ("out", json!("/mnt/gpu-preserve")),
+            ("out", json!("/mnt/gpu-preserve/x")),
             ("out", json!("relative/out")),
             ("blend", json!("relative.blend")),
             ("blend", json!("/a.txt")),

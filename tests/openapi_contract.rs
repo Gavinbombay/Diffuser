@@ -194,6 +194,7 @@ fn example_validation(doc: &Value) -> (Vec<String>, Vec<String>) {
     }
     (failures, pairs)
 }
+#[cfg(feature = "contract-docs")]
 #[test]
 fn openapi_response_examples_validate_all() {
     let doc = document();

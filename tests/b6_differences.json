@@ -1521,7 +1521,7 @@
   },
   "dsp-part-single": {
     "actual": {
-      "name": "warp-2070-bake"
+      "name": "local-2070-bake"
     },
     "reference": "A/glm-rust-port-corpus-golden-ext-20261101-b6-04w2/out/corpus/cases/dsp-part-single.json:1",
     "rule": "Whole-job part directories retain the existing -bake suffix.",
@@ -1532,7 +1532,7 @@
   },
   "dsp-part-unchunked": {
     "actual": {
-      "name": "warp-2070-bake"
+      "name": "local-2070-bake"
     },
     "reference": "A/glm-rust-port-corpus-golden-ext-20261101-b6-04w2/out/corpus/cases/dsp-part-unchunked.json:1",
     "rule": "Whole-job part directories retain the existing -bake suffix.",

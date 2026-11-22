@@ -79,7 +79,7 @@ pub fn ack_at(root: &Path, post: bool) -> Result<Value> {
                     .is_some_and(|t| prior_earliest.is_none_or(|e| t <= e));
             if root
                 .file_name()
-                .is_none_or(|n| n != "codex-operator-spine-20261112-nuc-linux")
+                .is_none_or(|n| n != "codex-operator-spine-20261112-linux")
                 || !authority
                 || !patch_ok
                 || !staged_match

@@ -102,7 +102,7 @@ pub(crate) fn gpu_admit(
 fn preferred_card(spec: &Value, row: &Value) -> bool {
     let Some(id) = row["id"]
         .as_str()
-        .filter(|id| matches!(*id, "colab-l4" | "echo-3060" | "warp-2070"))
+        .filter(|id| matches!(*id, "colab-l4" | "local-3060" | "local-2070"))
     else {
         return true;
     };
@@ -116,7 +116,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn spec() -> Value {
-        json!({"spec":"job-spec/v1","job_id":"job-123","lane":"tts","cartridge":"voice","card_pref":["colab-l4"],"items":[{"id":"one","args":[]}],"entry":"run","seg_min":1,"deadline_min":10,"max_segs":1,"budget_cu":2,"outputs":"warp:/mnt/sn850x/lanes/jobs/job-123/out"})
+        json!({"spec":"job-spec/v1","job_id":"job-123","lane":"tts","cartridge":"voice","card_pref":["colab-l4"],"items":[{"id":"one","args":[]}],"entry":"run","seg_min":1,"deadline_min":10,"max_segs":1,"budget_cu":2,"outputs":"worker:/var/lib/diffuser/jobs/job-123/out"})
     }
     fn unlicensed_cart() -> crate::cartridge::Cartridge {
         serde_json::from_value(json!({"id":"voice","lane":"tts","size_bytes":1,"min_vram_mb":0,"min_ram_mb":0,"required_backend":"cpu","license_id":"fixture","license_accepted":true,"files":{"weights":"[R]"}})).unwrap()
@@ -400,8 +400,8 @@ mod run37_admission_tests {
 
     #[test]
     fn run37_w5_gpu_and_license_refusal_table() {
-        let base = json!({"card_pref":["warp-2070"],"gpu_class":"l4"});
-        let card = json!({"id":"warp-2070","accepting":true,"capabilities":{"gpu_class":"L4","vram_mb":8000}});
+        let base = json!({"card_pref":["local-2070"],"gpu_class":"l4"});
+        let card = json!({"id":"local-2070","accepting":true,"capabilities":{"gpu_class":"L4","vram_mb":8000}});
         let licensed: crate::cartridge::Cartridge = serde_json::from_value(json!({"id":"fixture","lane":"tts","size_bytes":1,"min_vram_mb":8000,"min_ram_mb":0,"required_backend":"cpu","license_id":"fixture","license_accepted":true,"license_commercial":true,"files":{"weights":"[R]"}})).unwrap();
         let unlicensed: crate::cartridge::Cartridge = serde_json::from_value(json!({"id":"fixture","lane":"tts","size_bytes":1,"min_vram_mb":8000,"min_ram_mb":0,"required_backend":"cpu","license_id":"fixture","license_accepted":true,"license_commercial":false,"files":{"weights":"[R]"}})).unwrap();
         let mut missing = base.clone();

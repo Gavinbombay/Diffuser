@@ -29,16 +29,16 @@ name = "lane-router"
 path = "src/main.rs"
 
 [[bin]]
-name = "uai-diffuser"
+name = "diffuser"
 path = "src/main.rs"
 
 [[bin]]
 name = "lanes-ctl"
 path = "src/bin/lanes-ctl.rs"
 
-[[bin]]
-name = "crew-memory-bridge"
-path = "src/bin/crew-memory-bridge.rs"
+[features]
+# Tests that read the full contract documents, which ship separately from this repository.
+contract-docs = []
 
 [profile.release]
 opt-level = 2

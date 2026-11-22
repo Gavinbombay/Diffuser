@@ -28,7 +28,7 @@ pub(crate) async fn h_workers(
     let state_dir = a.compat["card_state_dir"]
         .as_str()
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/mnt/sn850x/lanes/gpu-backlog"));
+        .unwrap_or_else(|| PathBuf::from("/var/lib/diffuser/gpu-backlog"));
     let cards = a.cards.clone();
     let now = (a.clock)();
     let floor_path = a.compat["cu_floor_path"]
@@ -44,7 +44,7 @@ pub(crate) async fn h_workers(
         *cards.lock().unwrap() = snapshot.clone();
         let local = reg
             .iter()
-            .any(|w| w.id == "warp-2070")
+            .any(|w| w.id == "local-2070")
             .then(|| local_card_probe(now))
             .flatten();
         reg.iter()
@@ -59,7 +59,7 @@ pub(crate) async fn h_workers(
                         now,
                         heartbeat
                             .as_ref()
-                            .or(local.as_ref().filter(|_| w.id == "warp-2070")),
+                            .or(local.as_ref().filter(|_| w.id == "local-2070")),
                         floor,
                     )
                 } else {
@@ -174,11 +174,11 @@ pub(crate) async fn submit_in_process(a: App, lane: String, body: axum::body::By
         let state_dir = a.compat["card_state_dir"]
             .as_str()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/mnt/sn850x/lanes/gpu-backlog"));
+            .unwrap_or_else(|| PathBuf::from("/var/lib/diffuser/gpu-backlog"));
         let cards = card_state::refresh(&state_dir, now);
         let local = reg
             .iter()
-            .any(|w| w.id == "warp-2070")
+            .any(|w| w.id == "local-2070")
             .then(|| local_card_probe(now))
             .flatten();
         let floor = fs::read_to_string(&floor_path)
@@ -197,7 +197,7 @@ pub(crate) async fn submit_in_process(a: App, lane: String, body: axum::body::By
                         now,
                         heartbeat
                             .as_ref()
-                            .or(local.as_ref().filter(|_| w.id == "warp-2070")),
+                            .or(local.as_ref().filter(|_| w.id == "local-2070")),
                         floor,
                     )
                 } else {

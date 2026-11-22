@@ -9,22 +9,22 @@ use lane_router::lane_client::{
 };
 use serde::Serialize;
 
-const ECHO: &str = "GPU-2c7f6997-8a68-8394-96d3-d34a030ed8f6";
-const WARP: &str = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
+const GPU_A: &str = "GPU-2c7f6997-8a68-8394-96d3-d34a030ed8f6";
+const GPU_B: &str = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
 const API: &str = "compute.cuda.add-one/v1";
 const BACKEND: &str = "cuda-private-add-one/v1";
 const CUDA_BODY: &[u8] =
     br#"{"schema_version":"diffuser-private-cuda-input/v1","workload":"add_one"}"#;
 
 pub(super) fn case_pin(case: &str) -> la_backend::cuda::DeviceUuid {
-    la_backend::cuda::DeviceUuid::parse(if case == "cuda-warp" { WARP } else { ECHO }).unwrap()
+    la_backend::cuda::DeviceUuid::parse(if case == "cuda-b" { GPU_B } else { GPU_A }).unwrap()
 }
 
 pub(super) fn case_mode(case: &str) -> &'static str {
     match case {
         "cuda-reversed" => "reversed",
-        "cuda-warp" | "cuda-echo" => "",
-        "cuda-missing" => "warp-only",
+        "cuda-b" | "cuda-a" => "",
+        "cuda-missing" => "b-only",
         "cuda-no-driver" => "no-driver",
         "cuda-close-failure" => "close-failure",
         _ => panic!("unknown CUDA fixture case"),
@@ -198,10 +198,10 @@ fn release_revision(view: &Value) -> Revision {
 
 #[tokio::test]
 async fn cuda_route_exact_device_result_and_release() {
-    exact_device("cuda-reversed", ECHO, WARP).await;
-    exact_device("cuda-warp", WARP, ECHO).await;
+    exact_device("cuda-reversed", GPU_A, GPU_B).await;
+    exact_device("cuda-b", GPU_B, GPU_A).await;
     // Same hardware order and caller pin as the dlclose-only negative.
-    exact_device("cuda-echo", ECHO, WARP).await;
+    exact_device("cuda-a", GPU_A, GPU_B).await;
 }
 
 async fn exact_device(case: &str, wanted: &str, other: &str) {
@@ -365,7 +365,7 @@ async fn exact_device(case: &str, wanted: &str, other: &str) {
             "init",
             "count",
             "count",
-            if case == "cuda-echo" {
+            if case == "cuda-a" {
                 "context:1"
             } else {
                 "context:0"
@@ -474,14 +474,14 @@ async fn cuda_route_cleanup_failure_keeps_job_and_assignment_held() {
         .acquire_cuda(
             &store,
             Attempt::Start(&Id::new("cuda_cleanup_acquire").unwrap()),
-            &typed_acquire(ECHO),
+            &typed_acquire(GPU_A),
         )
         .await
         .unwrap();
     let assignment = assigned.assignment_id.as_str();
     let path = format!("/assignments/{assignment}");
     let input = f.client.upload("cuda_cleanup_input", CUDA_BODY).await;
-    let body = typed_submit(&input, ECHO);
+    let body = typed_submit(&input, GPU_A);
     let submit_key = Id::new("cuda_cleanup_submit").unwrap();
     f.refresh(&[]);
     let accepted = client
@@ -693,7 +693,7 @@ async fn cuda_route_release_refuses_actual_expired_evidence() {
         .acquire_cuda(
             &store,
             Attempt::Start(&Id::new("cuda_expired_acquire").unwrap()),
-            &typed_acquire(ECHO),
+            &typed_acquire(GPU_A),
         )
         .await
         .unwrap();
@@ -763,7 +763,7 @@ async fn cuda_route_unavailable_never_claims_or_falls_back() {
                 "POST",
                 "/assignments",
                 "cuda_acquire_missing",
-                acquire(ECHO),
+                acquire(GPU_A),
             )
             .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{denied}");
@@ -786,7 +786,7 @@ async fn cuda_route_unavailable_never_claims_or_falls_back() {
             "POST",
             "/assignments",
             "cuda_without_fixture",
-            acquire(ECHO),
+            acquire(GPU_A),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{denied}");

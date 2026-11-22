@@ -1,19 +1,19 @@
 [
   {
     "path": "diffusion-image/bad/diffusion-image-format.json",
-    "sha256": "7b1e2c17607ec9b2109d60e08754f17d7e6fe1c2c9f6eec02a866ef6d251b628"
+    "sha256": "9bbfad5f10a142a725dc535426a1a6e0c4a01e20cbe98a954b42073837df11b2"
   },
   {
     "path": "diffusion-image/bad/diffusion-image-missing-size.json",
-    "sha256": "058325f8ee9b295fb72a38f67dfb77993913c3ad1e1f2fac37480acf5ba3855d"
+    "sha256": "b797e4a1c09b557da3887176b4fe24aeaa991e35819bbf0abca2a2dd42c94b79"
   },
   {
     "path": "diffusion-image/bad/diffusion-image-steps-range.json",
-    "sha256": "d7babcfd9b5ca582fc3f8df7dde31bc7ec7763abf93b56d836f605a579994879"
+    "sha256": "71f3d32df905eb83556be7eed5b13fe9f013b49554909d1ddb14807350bca62d"
   },
   {
     "path": "diffusion-image/bad/diffusion-image-unknown-field.json",
-    "sha256": "f3a0170fa09893ccd09966bab4f7dc19b0e8e9c2087fc278f5fe674542be414e"
+    "sha256": "0a981b0473859e6195cdfb918683ecf9fc1ae0920883bec6ae389d3e2482ce69"
   },
   {
     "path": "diffusion-image/bad/diffusion-image-width-1537.json",
@@ -25,11 +25,11 @@
   },
   {
     "path": "diffusion-image/good/diffusion-image.good.json",
-    "sha256": "a07fa878e9f97041e6514f57d52865c5bdccfeff13cfc483b1fe1e3870cb9c97"
+    "sha256": "2fa5c511554dad119991ec76bceb4f150fe6e78e34749f834f7bbb54e54125b1"
   },
   {
     "path": "diffusion-image/semantic/diffusion-image-width-513.json",
-    "sha256": "3ca577228d2cd3ca60e6b28e7a0e6dce7b3487161b8786458f4ba2ff28132fb5"
+    "sha256": "33a0d3cbb6a2086c0bb8e149a5f71422aefdda82b91fbd4d13ef2b921de5c27a"
   },
   {
     "path": "diffusion-video/bad/diffusion-video-frames-481.json",
@@ -113,19 +113,19 @@
   },
   {
     "path": "tts/bad/tts-bad-format.json",
-    "sha256": "c73b31169b070bf1fde7faa9e615030302d3c7d16dc8c4b3328fc8c062e74e3c"
+    "sha256": "ca30f5f70a90cca0570f71f951dadad9ff87b62d3761600e820bb19bccd6fbf6"
   },
   {
     "path": "tts/bad/tts-bad-job-id.json",
-    "sha256": "1589939ac8c93b43b4431f5a6afe4f151832ad2cc4b9cc17881d06a15eef4372"
+    "sha256": "ce35fad62d5eef83cbf71f667dd45b107007b5c0978afa24b448500b5e586623"
   },
   {
     "path": "tts/bad/tts-missing-text.json",
-    "sha256": "cecd12ee62e9af5841bc32b7068e42a62bbc6bcf7c649d45163b1b3a40cbe368"
+    "sha256": "792fd4cc3803f7d9034631063be695c717ae99d28d98b85769d16789089cd76d"
   },
   {
     "path": "tts/bad/tts-null-optional.json",
-    "sha256": "acb6965524efac853db526da1037161b3b1a69d2b263f854dda9cfb7b03ca2eb"
+    "sha256": "b8191f31f5134cf666a16c8e2668dd9f4b54499a77af897fb2007540d6f0ebfa"
   },
   {
     "path": "tts/bad/tts-prefer-6.json",
@@ -133,50 +133,50 @@
   },
   {
     "path": "tts/bad/tts-prefer-duplicate.json",
-    "sha256": "c9f99300833fc34c1c1cd282d708f4697478d6bb8fd58313f606b20dae75df8e"
+    "sha256": "b8ee46d635efa32b3113005c4b763582e7e319a352d9f63b2a4d08b4367417c0"
   },
   {
     "path": "tts/bad/tts-seed-bool.json",
-    "sha256": "3493ad04c0d89f6c7f32ed133d620e8298751bb93329c520b2823518e74776d7"
+    "sha256": "015f0fb96b2a53a5a76a287977cf6e150894cfd919b8ae71bc4a856c8a0560f9"
   },
   {
     "path": "tts/bad/tts-seed-range.json",
-    "sha256": "79d6ce9ee99221fafa05b30f24a81bb90c56d8d292fd9f73328d00cca347e8ec"
+    "sha256": "08a21017f9d5e041e787f249de8575cf965fc6abd8695e43babb7076ce09085f"
   },
   {
     "path": "tts/bad/tts-text-10001.json",
-    "sha256": "f6b402de80b4fc416fdb4d794ffd8b9af267a049d95c94ff7c40676ba09aed62"
+    "sha256": "22d1e26dafcb4a35676e2aae2ad728a726b02ae883f25c999a4d44853d085ac2"
   },
   {
     "path": "tts/bad/tts-timeout-range.json",
-    "sha256": "8e275dcbda74869b8fcd8675d9e9e4d9759c0218281a27e694fc57d00a26e3d5"
+    "sha256": "53a1d6fae82d6520ef81c953b1f4e0de5caa80e23d08082781fb382e5ae0c67c"
   },
   {
     "path": "tts/bad/tts-unknown-field.json",
-    "sha256": "3e9a1cd53d765177ff94de6e8bd9214f89a9306c3b4cc6fce9a934a54d8d6143"
+    "sha256": "e43a52dc5f7e6f2220931376b78675327ce88e7a960078625c714c4fe4915dcf"
   },
   {
     "path": "tts/bad/tts-unknown-lane.json",
-    "sha256": "7461db69aa80cb6d2711e3a071ceb4e1b33d21d740860d8ea8d03f04e5fb8f91"
+    "sha256": "482526d3bd4bf88dc5668b61295eb7342c5cbbf21a155cbdd6d9687b349f52ea"
   },
   {
     "path": "tts/bad/tts-wrong-api.json",
-    "sha256": "afc3be1f22ccfb28ef2e7e3c1bb6e580d5a849ef986e545b1e661936420cebeb"
+    "sha256": "9ad9ab0f336f557bdac6ef24647311a690c96d9c89328247fa27799ec1c7afe2"
   },
   {
     "path": "tts/good/tts.boundary-max.json",
-    "sha256": "0ef8630b416dd183fe50ec7d11af31b8a201cbfbce4c40f6e5801cf5b6f97793"
+    "sha256": "858e3e1a350296e86163467375eaea0c7525b719323161e591077336bb51df44"
   },
   {
     "path": "tts/good/tts.good.json",
-    "sha256": "5577fd915cfec517b628c12e6d6e1aa8daa6abed6cd145d9f8325e6e0838b001"
+    "sha256": "919b54fa3c355be9ab60956de130b9a036734a9cfa33572a220e798445ccd912"
   },
   {
     "path": "tts/semantic/tts-rate-23000.json",
-    "sha256": "479cbc537883cca532c14fa0367262a89f6fd70b5175519ce068f99a1b1c3967"
+    "sha256": "7429998252271c3f5a357f982d832a19b394a0ad37c61907de47f5247d9e3ac9"
   },
   {
     "path": "tts/semantic/tts-voice-unknown.json",
-    "sha256": "9dfa3c1f5cf1d552149bd03ec4407b94402fb7250e5d243e2381c12182735385"
+    "sha256": "8388fc4eaca6dc5a99e429cca3726fd4da5b21722ef1c42587ce1f37435b5477"
   }
 ]

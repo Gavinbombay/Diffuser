@@ -5,8 +5,8 @@
   "cartridge": "default",
   "timeout_min": 45,
   "prefer": [
-    "echo-3060",
-    "echo-3060"
+    "local-3060",
+    "local-3060"
   ],
   "text": "This is an offline design fixture.",
   "voice": "default",

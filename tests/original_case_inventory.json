@@ -1,16 +1,6 @@
 {
   "provenance": "prerequisites/native-tests/PARSED-TESTS.json; unchanged native baseline",
   "targets": {
-    "crew-memory-bridge": {
-      "src_path": "src/bin/crew-memory-bridge.rs",
-      "cases": [
-        "common::tests::absent_ack_fails_closed",
-        "common::tests::sha_is_content_addressed",
-        "tests::folder_traversal_refused",
-        "tests::incomplete_frontmatter_refused",
-        "tests::remote_envelopes_match_full_identity"
-      ]
-    },
     "lane-router": {
       "src_path": "src/main.rs",
       "cases": [
@@ -1402,7 +1392,7 @@
         "tests::unix_socket_unavailable_is_typed"
       ]
     },
-    "uai-diffuser": {
+    "diffuser": {
       "src_path": "src/main.rs",
       "cases": [
         "agent_pull::authorization_tests::authorizes_every_offered_lane_in_order",

@@ -142,7 +142,7 @@ fn commercial_license_gate_real_admission() {
     .unwrap();
     std::env::set_var("LANE_REGISTRY", registry);
     std::env::set_var("LANE_TOKEN_SHA_DIR", auth_dir);
-    let spec = json!({"spec":"job-spec/v1","job_id":"job-123","lane":"tts","cartridge":"voice","use":"internal","card_pref":["echo-3060"],"items":[{"id":"one","args":[]}],"entry":"run","seg_min":1,"deadline_min":10,"max_segs":1,"outputs":"warp:/mnt/sn850x/lanes/jobs/job-123/out"});
+    let spec = json!({"spec":"job-spec/v1","job_id":"job-123","lane":"tts","cartridge":"voice","use":"internal","card_pref":["local-3060"],"items":[{"id":"one","args":[]}],"entry":"run","seg_min":1,"deadline_min":10,"max_segs":1,"outputs":"worker:/var/lib/diffuser/jobs/job-123/out"});
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         for (config, expected) in [(json!({"lanes":{"tts":true}}), StatusCode::CONFLICT), (json!({"lanes":{"tts":true},"require_commercial":false}), StatusCode::ACCEPTED)] {
             let app = App { st: Arc::new(Mutex::new(JobTable::default())), compat: crate::lane_gate::fixture_config(config, "tts", "voice"), store_root: store_root.clone(), cards: Arc::new(Mutex::new(HashMap::new())), clock: clock_now };

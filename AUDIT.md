@@ -19,7 +19,7 @@ All six leads identified during the full high-effort pass were remediated and in
 
 1. **Fleet worker RPC replay freshness**: Signed worker RPC requests now bind a per-start session ID, timestamp freshness window, and single-use random job ID; workers consume IDs before execution and reject stale or replayed requests.
 2. **Fleet worker RPC cleartext transport**: Enrollment and dispatch require HTTPS for remote worker URLs, allowing plain HTTP only on explicit loopback addresses (`127.0.0.1`, `::1`, `localhost`).
-3. **Memory bridge cleartext bearer transport**: Remote bridge URLs require HTTPS with loopback-only HTTP exception, proxy discovery disabled, and redirects disabled.
+3. **Memory bridge cleartext bearer transport**: Remote bridge URLs require HTTPS with loopback-only HTTP exception, proxy discovery disabled, and redirects disabled. (The memory bridge binary has since been removed from this repository.)
 4. **Loopback ready-queue disclosure**: `GET` and `HEAD` inspection routes require the `0600` Unix admin control socket with peer UID verification; TCP listener has admin routes disabled.
 5. **Colab snapshot state trust**: Snapshot reads enforce a service-owned `0700` directory and `0600` regular single-link file alongside schema, freshness, and probe checks.
 6. **Watchdog backlog permissions**: Backlog, standing entries, and job specs are read through a service-owned private spool rejecting unsafe ownership, modes, symlinks, and path traversal.

@@ -4,7 +4,7 @@
   "lane": "tts",
   "cartridge": "fixture",
   "card_pref": [
-    "warp-2070"
+    "local-2070"
   ],
   "items": [
     {
@@ -21,7 +21,7 @@
   "seg_min": 1.5,
   "deadline_min": 10,
   "max_segs": 2,
-  "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-tts/out",
+  "outputs": "worker:/var/lib/diffuser/jobs/wire-tts/out",
   "entry": "run",
   "budget_cu": 2,
   "cap_cu": 3,

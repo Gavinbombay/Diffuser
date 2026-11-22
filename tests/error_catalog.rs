@@ -1,5 +1,6 @@
 use super::*;
 use crate::*;
+#[cfg(feature = "contract-docs")]
 #[test]
 fn catalog_document_rows_equal_const_table() {
     let doc = include_str!("../docs/ERRORS.md");

@@ -101,6 +101,7 @@ mod run37_boundary_tests {
         assert_eq!(job_id(&json!({"job_id":"job-valid"})), "job-valid");
     }
 
+    #[cfg(feature = "contract-docs")]
     #[test]
     fn run37_w2_status_catalog_and_docs_table() {
         let rows = [

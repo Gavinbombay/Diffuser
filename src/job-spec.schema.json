@@ -47,8 +47,8 @@
       "items": {
         "enum": [
           "colab-l4",
-          "echo-3060",
-          "warp-2070"
+          "local-3060",
+          "local-2070"
         ]
       }
     },
@@ -106,7 +106,7 @@
     },
     "outputs": {
       "type": "string",
-      "pattern": "^warp:/mnt/sn850x/lanes/jobs/[a-z0-9][a-z0-9._-]{2,95}/out$"
+      "pattern": "^worker:/var/lib/diffuser/jobs/[a-z0-9][a-z0-9._-]{2,95}/out$"
     },
     "gpu_class": {
       "enum": [
@@ -170,7 +170,7 @@
     "lane": "render-blender",
     "cartridge": "fixture",
     "card_pref": [
-      "warp-2070"
+      "local-2070"
     ],
     "items": [
       {
@@ -187,7 +187,7 @@
     "seg_min": 1.5,
     "deadline_min": 10,
     "max_segs": 2,
-    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-render-blender/out",
+    "outputs": "worker:/var/lib/diffuser/jobs/wire-render-blender/out",
     "blend": "fixture.blend"
   },
   {
@@ -196,7 +196,7 @@
     "lane": "diffusion-video",
     "cartridge": "fixture",
     "card_pref": [
-      "warp-2070"
+      "local-2070"
     ],
     "items": [
       {
@@ -213,7 +213,7 @@
     "seg_min": 1.5,
     "deadline_min": 10,
     "max_segs": 2,
-    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-diffusion-video/out",
+    "outputs": "worker:/var/lib/diffuser/jobs/wire-diffusion-video/out",
     "entry": "run"
   },
   {
@@ -222,7 +222,7 @@
     "lane": "diffusion-image",
     "cartridge": "fixture",
     "card_pref": [
-      "warp-2070"
+      "local-2070"
     ],
     "items": [
       {
@@ -239,7 +239,7 @@
     "seg_min": 1.5,
     "deadline_min": 10,
     "max_segs": 2,
-    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-diffusion-image/out",
+    "outputs": "worker:/var/lib/diffuser/jobs/wire-diffusion-image/out",
     "entry": "run"
   },
   {
@@ -248,7 +248,7 @@
     "lane": "tts",
     "cartridge": "fixture",
     "card_pref": [
-      "warp-2070"
+      "local-2070"
     ],
     "items": [
       {
@@ -265,7 +265,7 @@
     "seg_min": 1.5,
     "deadline_min": 10,
     "max_segs": 2,
-    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-tts/out",
+    "outputs": "worker:/var/lib/diffuser/jobs/wire-tts/out",
     "entry": "run",
     "budget_cu": 2,
     "cap_cu": 3,
@@ -282,7 +282,7 @@
     "lane": "stt",
     "cartridge": "fixture",
     "card_pref": [
-      "warp-2070"
+      "local-2070"
     ],
     "items": [
       {
@@ -299,7 +299,7 @@
     "seg_min": 1.5,
     "deadline_min": 10,
     "max_segs": 2,
-    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-stt/out",
+    "outputs": "worker:/var/lib/diffuser/jobs/wire-stt/out",
     "entry": "run"
   },
   {
@@ -308,7 +308,7 @@
     "lane": "music-sfx",
     "cartridge": "fixture",
     "card_pref": [
-      "warp-2070"
+      "local-2070"
     ],
     "items": [
       {
@@ -325,7 +325,7 @@
     "seg_min": 1.5,
     "deadline_min": 10,
     "max_segs": 2,
-    "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-music-sfx/out",
+    "outputs": "worker:/var/lib/diffuser/jobs/wire-music-sfx/out",
     "entry": "run"
   }
 ]

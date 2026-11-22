@@ -4,12 +4,12 @@ use super::*;
 fn proof_source_on_rows() {
     for (id, bytes) in [
         (
-            "warp-2070",
-            &include_bytes!("../tests/fixtures/card-state/warp-2070.json")[..],
+            "local-2070",
+            &include_bytes!("../tests/fixtures/card-state/local-2070.json")[..],
         ),
         (
-            "echo-3060",
-            &include_bytes!("../tests/fixtures/card-state/echo-3060-self-probe-fresh.json")[..],
+            "local-3060",
+            &include_bytes!("../tests/fixtures/card-state/local-3060-self-probe-fresh.json")[..],
         ),
         (
             "colab-l4",
@@ -46,7 +46,7 @@ fn proof_source_on_rows() {
         assert_eq!(row["proved"], true);
         assert_eq!(
             row["proof_source"],
-            if id == "echo-3060" {
+            if id == "local-3060" {
                 "self-probe"
             } else {
                 "router-probe"

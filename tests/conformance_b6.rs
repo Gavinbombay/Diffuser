@@ -463,12 +463,12 @@ fn run_limits(rows: Vec<Value>) {
         if spec.get("job_id").is_none() {
             row["job_id"] = json!(format!("job-{}", spec["lane"].as_str().unwrap()));
         }
-        deadline::dispatch(&mut row, "echo-3060", now).unwrap();
+        deadline::dispatch(&mut row, "local-3060", now).unwrap();
         deadline::accept(&mut row, now).unwrap();
         deadline::report(&mut row, 0, None, now).unwrap();
         deadline::merge(&mut row, got.is_ok(), now).unwrap();
         row["spec_sha256"] = json!(deadline::fingerprint(spec));
-        row["chunks"] = json!([{"worker":"echo-3060"}]);
+        row["chunks"] = json!([{"worker":"local-3060"}]);
         row["artifacts"] = json!(arts);
         row["state"] = actual["outcome"].clone();
         row["reason"] = actual["reason"].clone();
@@ -2662,7 +2662,7 @@ fn b6_family_no_reference_idempotency() {
 }
 #[test]
 fn b6_family_whole_job_part_suffix() {
-    pinned_family("whole_job_part_suffix", 2, "Whole-job part directories retain the existing -bake suffix. E2 and S03 retain established delivery layout, nonempty artifact verification and refusal wording; the difference is observable and stays asserted.", "dsp-part-single", json!({"name": "warp-2070-bake"}));
+    pinned_family("whole_job_part_suffix", 2, "Whole-job part directories retain the existing -bake suffix. E2 and S03 retain established delivery layout, nonempty artifact verification and refusal wording; the difference is observable and stays asserted.", "dsp-part-single", json!({"name": "local-2070-bake"}));
 }
 #[test]
 fn b6_family_nonempty_delivery() {
@@ -2694,6 +2694,7 @@ fn b6_family_artifact_count_precedence() {
     pinned_family("artifact_count_precedence", 2, "The result schema permits at most eight artifacts and E2 checks this before frame measurements. D2 and D3 are held. Artifact count validation precedes measurement; changing precedence would change a pinned decision.", "lim-rl-dv-inconsistent", json!({"outcome": "failed", "reason": "artifact-count-exceeded"}));
 }
 
+#[cfg(feature = "contract-docs")]
 fn conformance_rows_match(manifest: &Value, differences: &Value, text: &str) -> Result<(), String> {
     let ids: HashSet<_> = manifest["cases"]
         .as_array()
@@ -2738,6 +2739,7 @@ fn conformance_rows_match(manifest: &Value, differences: &Value, text: &str) -> 
     }
     Ok(())
 }
+#[cfg(feature = "contract-docs")]
 #[test]
 fn b6_class_and_reason_require_matching_document_rows() {
     let manifest: Value =
@@ -2750,6 +2752,7 @@ fn b6_class_and_reason_require_matching_document_rows() {
     )
     .unwrap();
 }
+#[cfg(feature = "contract-docs")]
 #[test]
 fn b6_guard_names_mutated_entry_and_accepts_matching_row_edit() {
     let manifest: Value =

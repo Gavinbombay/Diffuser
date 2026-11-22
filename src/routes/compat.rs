@@ -597,7 +597,7 @@ mod fuzz_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "contract-docs"))]
 mod run35_u4 {
     use super::*;
     use std::collections::BTreeSet;

@@ -19503,6 +19503,7 @@ where
     Ok(ProtectedActivationTask { sender, thread })
 }
 
+#[cfg(feature = "contract-docs")]
 #[tokio::test]
 async fn documented_namespace_requests_match_closed_routes_without_initialization() {
     use sha2::{Digest, Sha256};
@@ -19732,6 +19733,10 @@ where
     Ok(ProtectedEpochTask { sender, thread })
 }
 
+#[cfg(not(feature = "contract-docs"))]
+fn assert_development_response(_name: &str, _value: &serde_json::Value) {}
+
+#[cfg(feature = "contract-docs")]
 fn assert_development_response(name: &str, value: &serde_json::Value) {
     let document: serde_json::Value =
         serde_json::from_str(include_str!("../../docs/cosp/lane-assignment.schema.json")).unwrap();

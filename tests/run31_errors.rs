@@ -1,6 +1,7 @@
 //! Bidirectional code parity with diagnostics naming every orphan.
 use crate::*;
 use std::collections::BTreeSet;
+#[cfg(feature = "contract-docs")]
 fn parity(text: &str) -> Result<usize, String> {
     let catalog = error_catalog::TABLE
         .iter()
@@ -25,6 +26,7 @@ fn parity(text: &str) -> Result<usize, String> {
         Ok(catalog.len())
     }
 }
+#[cfg(feature = "contract-docs")]
 #[test]
 fn run31_real_error_docs_match_catalog() {
     let count = parity(include_str!("../docs/ERRORS.md")).unwrap();
@@ -35,6 +37,7 @@ fn run31_real_error_docs_match_catalog() {
     )
     .unwrap();
 }
+#[cfg(feature = "contract-docs")]
 #[test]
 fn run31_planted_error_doc_orphans_are_named() {
     let text = include_str!("../docs/ERRORS.md");

@@ -705,6 +705,7 @@ mod tests {
             Err(crate::error_catalog::BAD_SPEC)
         );
     }
+    #[cfg(feature = "contract-docs")]
     #[test]
     fn test_doc_agreement() {
         let notes = include_str!("../FOLD-NOTES.md");

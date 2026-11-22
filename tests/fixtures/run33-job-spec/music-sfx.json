@@ -4,7 +4,7 @@
   "lane": "music-sfx",
   "cartridge": "fixture",
   "card_pref": [
-    "warp-2070"
+    "local-2070"
   ],
   "items": [
     {
@@ -21,6 +21,6 @@
   "seg_min": 1.5,
   "deadline_min": 10,
   "max_segs": 2,
-  "outputs": "warp:/mnt/sn850x/lanes/jobs/wire-music-sfx/out",
+  "outputs": "worker:/var/lib/diffuser/jobs/wire-music-sfx/out",
   "entry": "run"
 }

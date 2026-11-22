@@ -10,9 +10,6 @@ pub use ack::ack_at;
 #[path = "common_contains.rs"]
 mod contains;
 pub use contains::contains_banned_name;
-#[path = "common_publication.rs"]
-mod publication;
-pub use publication::publication_guard;
 
 #[path = "common_ack_wrapper.rs"]
 mod ack_wrapper;

@@ -140,7 +140,7 @@ pub(crate) fn registry_why(
 }
 pub(crate) fn worker_view(w: &Worker, lane: &str, busy_local: &HashMap<String, usize>) -> Value {
     let mut why: Vec<String> = vec![];
-    if matches!(w.id.as_str(), "colab-l4" | "echo-3060" | "warp-2070") {
+    if matches!(w.id.as_str(), "colab-l4" | "local-3060" | "local-2070") {
         why.push("card state not proved".into());
     }
     let mut caps = Value::Null;
@@ -460,8 +460,8 @@ pub(crate) fn validate(spec: &Value) -> Result<(), String> {
         }
         let out = spec["out"].as_str().ok_or("spec.out missing")?;
         if !out.starts_with('/')
-            || out == "/mnt/warp-preserve"
-            || out.starts_with("/mnt/warp-preserve/")
+            || out == "/mnt/gpu-preserve"
+            || out.starts_with("/mnt/gpu-preserve/")
         {
             return Err("invalid out path".into());
         }
@@ -530,8 +530,8 @@ pub(crate) fn validate(spec: &Value) -> Result<(), String> {
     if !out.starts_with('/') {
         return Err("out must be absolute".into());
     }
-    if out == "/mnt/warp-preserve" || out.starts_with("/mnt/warp-preserve/") {
-        return Err("out must never be under /mnt/warp-preserve".into());
+    if out == "/mnt/gpu-preserve" || out.starts_with("/mnt/gpu-preserve/") {
+        return Err("out must never be under /mnt/gpu-preserve".into());
     }
     dispatch_kinds::fresh_output(Path::new(out)).map_err(str::to_owned)?;
     let t = spec["timeout_min"]
@@ -2274,7 +2274,7 @@ mod run33_dispatch_tests {
     }
     fn worker() -> Worker {
         Worker {
-            id: "warp-2070".into(),
+            id: "local-2070".into(),
             lanes: vec!["render-blender".into()],
             kind: "exec".into(),
             exec: String::new(),
@@ -2285,7 +2285,7 @@ mod run33_dispatch_tests {
         }
     }
     fn fixture() -> (JobTable, Value) {
-        let spec = json!({"job_id":"dispatch-fixture","lane":"render-blender","frames":"1-9","prefer":["warp-2070"]});
+        let spec = json!({"job_id":"dispatch-fixture","lane":"render-blender","frames":"1-9","prefer":["local-2070"]});
         let mut table = JobTable {
             clock: Some(fixed_clock),
             ..JobTable::default()
@@ -2301,7 +2301,7 @@ mod run33_dispatch_tests {
         let mut observations = Vec::new();
         for _ in 0..3 {
             let (mut table, spec) = fixture();
-            let views = vec![json!({"id":"warp-2070","accepting":true})];
+            let views = vec![json!({"id":"local-2070","accepting":true})];
             let (parts, seen) = plan_from_views(&spec, &[worker()], views).unwrap();
             assert_eq!(parts.len(), 1);
             assert_eq!((parts[0].1, parts[0].2), (1, 9));
@@ -2351,7 +2351,7 @@ mod run33_dispatch_tests {
                 plan_from_views(
                     &spec,
                     &[chosen.clone()],
-                    vec![json!({"id":"warp-2070","accepting":true})]
+                    vec![json!({"id":"local-2070","accepting":true})]
                 )
                 .unwrap_err(),
                 expected

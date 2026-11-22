@@ -1,7 +1,7 @@
 {
  "schema_version": "card-state/v1",
- "card": "warp-2070",
- "worker_id": "warp-2070",
+ "card": "local-2070",
+ "worker_id": "local-2070",
  "ts": "2026-10-31T12:40:00-02:30",
  "epoch": 1793459400,
  "state": "idle",

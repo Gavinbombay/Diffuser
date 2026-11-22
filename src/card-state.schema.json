@@ -26,15 +26,15 @@
   "card": {
    "enum": [
     "colab-l4",
-    "echo-3060",
-    "warp-2070"
+    "local-3060",
+    "local-2070"
    ]
   },
   "worker_id": {
    "enum": [
     "colab-l4",
-    "echo-3060",
-    "warp-2070"
+    "local-3060",
+    "local-2070"
    ],
    "description": "router worker id; equals card"
   },
@@ -129,7 +129,7 @@
     "source": {
      "enum": [
       "nvidia-smi-local",
-      "nvidia-smi-ssh-echo-gpu",
+      "nvidia-smi-ssh-local-gpu",
       "colab-l4-run-health",
       "colab-l4-run-status",
       "last-known"
@@ -310,7 +310,7 @@
     "router-probe",
     "self-probe"
    ],
-   "description": "how R2 proves this state: router-probe = router's own injected probe or Colab heartbeat (warp-2070, colab-l4); self-probe = the host pusher's own nvidia-smi reading (ssh-only cards, echo-3060)"
+   "description": "how R2 proves this state: router-probe = router's own injected probe or Colab heartbeat (local-2070, colab-l4); self-probe = the host pusher's own nvidia-smi reading (ssh-only cards, local-3060)"
   },
   "self_probe": {
    "type": "object",
@@ -327,8 +327,8 @@
     "worker_id": {
      "enum": [
       "colab-l4",
-      "echo-3060",
-      "warp-2070"
+      "local-3060",
+      "local-2070"
      ]
     },
     "epoch": {
@@ -356,7 +356,7 @@
     "G4",
     "H100"
    ],
-   "description": "GPU class of the card (Kraydence 13:01 C4 ruling). Required for colab-l4; local consumer cards (echo-3060, warp-2070) omit it. Matches job-spec/v1 gpu_class case-insensitively (job 'any' matches every class)."
+   "description": "GPU class of the card (C4 ruling). Required for colab-l4; local consumer cards (local-3060, local-2070) omit it. Matches job-spec/v1 gpu_class case-insensitively (job 'any' matches every class)."
   },
   "vram_gb": {
    "type": "number",
@@ -411,14 +411,14 @@
    "if": {
     "properties": {
      "card": {
-      "const": "echo-3060"
+      "const": "local-3060"
      }
     }
    },
    "then": {
     "properties": {
      "worker_id": {
-      "const": "echo-3060"
+      "const": "local-3060"
      }
     }
    }
@@ -427,14 +427,14 @@
    "if": {
     "properties": {
      "card": {
-      "const": "warp-2070"
+      "const": "local-2070"
      }
     }
    },
    "then": {
     "properties": {
      "worker_id": {
-      "const": "warp-2070"
+      "const": "local-2070"
      }
     }
    }

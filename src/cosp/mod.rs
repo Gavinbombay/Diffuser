@@ -69,7 +69,7 @@ fn gate(c: &rusqlite::Connection) -> Value {
     .unwrap_or(Value::Null)
 }
 fn lanes() -> Vec<Value> {
-    ["render-blender","tts","stt","diffusion-image","diffusion-video","music-sfx","inference.echo.cuda","inference.nuc.syl","inference.nuc.npu","inference.finn.arc","aux.free"].into_iter().map(|id|json!({"lane_id":id,"accepting":false,"disabled_reason":if id=="render-blender"{"echo-3060 retired, RULES.md:40"}else{"capability_unavailable: no admitted worker"}})).collect()
+    ["render-blender","tts","stt","diffusion-image","diffusion-video","music-sfx","inference.gpu.cuda","inference.cpu.syl","inference.cpu.npu","inference.igpu.arc","aux.free"].into_iter().map(|id|json!({"lane_id":id,"accepting":false,"disabled_reason":if id=="render-blender"{"local-3060 retired"}else{"capability_unavailable: no admitted worker"}})).collect()
 }
 fn worker_call(s: &Spine, id: &str, path: &str, body: Option<&Value>) -> Result<Value> {
     let url = format!(
@@ -375,8 +375,8 @@ fn mutation(s: &Spine, path: &str, h: &HeaderMap, b: &Value) -> Result<(u16, Val
         }
         match action {
             "claim" => {
-                if b["runner_host"] != "nuc" {
-                    return common::fail(412, "host_not_nuc");
+                if b["runner_host"] != "controller" {
+                    return common::fail(412, "host_not_controller");
                 }
                 if v["state"] != "ready_admitted"
                     && v["state"] != "paused_checkpoint"
@@ -463,7 +463,7 @@ pub fn validate_brief(root: &std::path::Path) -> Result<Value> {
     }
     if !text.contains("0a")
         || !text.contains("ACK.md")
-        || !text.contains("nuc")
+        || !text.contains("controller")
         || regex::Regex::new(r"[A-Za-z]:\\").unwrap().is_match(&text)
     {
         return common::fail(61, "brief_stale_path_or_host");
@@ -473,7 +473,7 @@ pub fn validate_brief(root: &std::path::Path) -> Result<Value> {
         .arg("check")
         .arg("--id")
         .arg(root.file_name().unwrap_or_default())
-        .args(["--lane", "codex-main-nuc", "--dir"])
+        .args(["--lane", "codex-main", "--dir"])
         .arg(root)
         .output()
         .map_err(|_| Failure(66, "qc_gate_blocked"))?;
@@ -528,7 +528,7 @@ async fn handle(
                     v["lanes_summary"] = json!(lanes());
                     v
                 }
-                "/v1/health" => json!({"protocol":"service-lane/v1","lanes":lanes(),"workers":[{"worker_id":"echo-3060","accepting":false,"status":"retired"},{"worker_id":"warp-2070","accepting":false,"status":"disabled_fault"}]}),
+                "/v1/health" => json!({"protocol":"service-lane/v1","lanes":lanes(),"workers":[{"worker_id":"local-3060","accepting":false,"status":"retired"},{"worker_id":"local-2070","accepting":false,"status":"disabled_fault"}]}),
                 "/v1/embed/health" => {
                     let v = embed_health(&s)?;
                     if v["alert_state"] == "crit_all_embed_workers_down" {
@@ -627,7 +627,7 @@ pub fn main_cli() -> i32 {
         return common::emit(la_startup_check::check(&a));
     }
     let root =
-        PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/uai-diffuser".into()));
+        PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/diffuser".into()));
     if let Some(fleet_worker_cfg) = common::opt(&a, "--fleet-worker") {
         return fleet::run_fleet_worker(Path::new(&fleet_worker_cfg));
     }

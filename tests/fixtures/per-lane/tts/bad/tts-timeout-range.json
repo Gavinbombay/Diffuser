@@ -5,8 +5,8 @@
   "cartridge": "default",
   "timeout_min": 361,
   "prefer": [
-    "echo-3060",
-    "warp-2070",
+    "local-3060",
+    "local-2070",
     "rook-4060",
     "colab-l4"
   ],

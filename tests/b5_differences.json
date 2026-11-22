@@ -5,13 +5,13 @@
   },
   "dsp-part-single": {
     "actual": {
-      "name": "warp-2070-bake"
+      "name": "local-2070-bake"
     },
     "rule": "Whole-job part directories retain the existing -bake suffix."
   },
   "dsp-part-unchunked": {
     "actual": {
-      "name": "warp-2070-bake"
+      "name": "local-2070-bake"
     },
     "rule": "Whole-job part directories retain the existing -bake suffix."
   },

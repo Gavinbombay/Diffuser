@@ -1,6 +1,6 @@
 //! Diffuser v1.0 Scalable Multi-Worker Fleet Router, Pluggable Workload Runner & MCP Surface.
 //!
-//! Mounted under `/v1/fleet/*` on `uai-diffuser` when `--fleet-config <path>` is supplied.
+//! Mounted under `/v1/fleet/*` on `diffuser` when `--fleet-config <path>` is supplied.
 //! When `--fleet-config` is omitted, `/v1/fleet/*` fails closed with `503 fleet_closed`.
 
 use axum::{

@@ -18,7 +18,7 @@ fn candidate(card: &str, job: &Value, index: Option<usize>) -> Option<Candidate>
         || !id
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        || !matches!(card, "warp-2070" | "echo-3060" | "colab-l4")
+        || !matches!(card, "local-2070" | "local-3060" | "colab-l4")
         || job["card"] != card
         || job["status"] != "ready"
     {
@@ -181,7 +181,7 @@ impl Watchdog {
         let workers = super::load_registry().unwrap_or_default();
         let probe = workers
             .iter()
-            .any(|w| w.id == "warp-2070")
+            .any(|w| w.id == "local-2070")
             .then(|| super::local_card_probe(now))
             .flatten();
         self.tick_with(app, now, workers, probe, super::submit_in_process)
@@ -245,7 +245,7 @@ impl Watchdog {
                 .exists();
         for worker in workers
             .iter()
-            .filter(|w| matches!(w.id.as_str(), "warp-2070" | "echo-3060" | "colab-l4"))
+            .filter(|w| matches!(w.id.as_str(), "local-2070" | "local-3060" | "colab-l4"))
         {
             let card = &worker.id;
             let state = &snapshot[card];
@@ -257,7 +257,7 @@ impl Watchdog {
                 now,
                 heartbeat
                     .as_ref()
-                    .or(probe.as_ref().filter(|_| card == "warp-2070")),
+                    .or(probe.as_ref().filter(|_| card == "local-2070")),
             )
             .is_ok();
             let row = serde_json::json!({"proved":proof, "card_state":state});
@@ -577,7 +577,7 @@ mod tests {
             if with_job {
                 fixture_file(
                     &root.join("backlog.json"),
-                    json!({"jobs":[{"job":"job-1","card":"echo-3060","path":"render-blender","status":"ready","args":[root.join("spec.json")]}]}).to_string(),
+                    json!({"jobs":[{"job":"job-1","card":"local-3060","path":"render-blender","status":"ready","args":[root.join("spec.json")]}]}).to_string(),
                 );
             }
             let app = super::super::new_app(
@@ -585,7 +585,7 @@ mod tests {
                 root.join("store"),
             );
             let worker = super::super::Worker {
-                id: "echo-3060".into(),
+                id: "local-3060".into(),
                 lanes: vec!["render-blender".into()],
                 kind: "agent-push".into(),
                 exec: String::new(),
@@ -598,12 +598,12 @@ mod tests {
         }
         fn state(&self, now: u64) {
             let mut v: Value = serde_json::from_slice(include_bytes!(
-                "../tests/fixtures/card-state/echo-3060-self-probe-fresh.json"
+                "../tests/fixtures/card-state/local-3060-self-probe-fresh.json"
             ))
             .unwrap();
             v["epoch"] = json!(now);
             v["self_probe"]["epoch"] = json!(now);
-            fixture_file(&self.root.join("cards/echo-3060.json"), v.to_string());
+            fixture_file(&self.root.join("cards/local-3060.json"), v.to_string());
         }
         async fn tick(&self, w: &mut Watchdog, now: u64) {
             self.state(now);
@@ -659,12 +659,12 @@ mod tests {
             if matches!(case, "standing" | "standing_mode") {
                 fixture_file(
                     &spool.join("standing.tsv"),
-                    format!("echo-3060\trender-blender\tjob-1\t{}\n", spec.display()),
+                    format!("local-3060\trender-blender\tjob-1\t{}\n", spec.display()),
                 );
             } else {
                 fixture_file(
                     &spool.join("backlog.json"),
-                    json!({"jobs":[{"job":"job-1","card":"echo-3060","lane":"render-blender","status":"ready","args":[spec]}]}).to_string(),
+                    json!({"jobs":[{"job":"job-1","card":"local-3060","lane":"render-blender","status":"ready","args":[spec]}]}).to_string(),
                 );
             }
             let permissive = match case {
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn ollama_ignored() {
         let row = json!({"proved":true,"card_state":{"state":"busy","busy":{"by":"external-unit","ref":"ollama"},"util":0}});
-        assert!(idle_candidate("echo-3060", &row, false, 10.0));
+        assert!(idle_candidate("local-3060", &row, false, 10.0));
     }
     #[tokio::test]
     async fn cannot_admit_event_alert_no_dispatch() {
@@ -758,7 +758,7 @@ mod tests {
             f.tick(&mut w, now).await;
         }
         assert!(!f.root.join("events.csv").exists());
-        assert_eq!(f.app.cards.lock().unwrap()["echo-3060"]["util"], 0);
+        assert_eq!(f.app.cards.lock().unwrap()["local-3060"]["util"], 0);
     }
     #[tokio::test]
     async fn empty_backlog_one_alert_per_card_per_hour() {
@@ -778,8 +778,8 @@ mod tests {
     #[test]
     fn alert_limit_survives_restart() {
         let f = Fixture::new(false);
-        Watchdog::default().alert(&f.root, 1000, "echo-3060", "empty");
-        Watchdog::default().alert(&f.root, 1100, "echo-3060", "empty");
+        Watchdog::default().alert(&f.root, 1000, "local-3060", "empty");
+        Watchdog::default().alert(&f.root, 1100, "local-3060", "empty");
         assert_eq!(
             std::fs::read_to_string(f.root.join("alerts.log"))
                 .unwrap()
@@ -872,7 +872,7 @@ mod tests {
                 std::env::set_var("LANE_TOKEN_SHA_DIR", auth_dir);
                 let floor = f.root.join("floor"); std::fs::write(&floor, "5").unwrap();
                 f.app.compat["cu_floor_path"] = json!(floor); f.app.compat["cu_balance"] = json!(balance);
-                let spec = json!({"spec":"job-spec/v1","job_id":"job-1","lane":"render-blender","cartridge":"fixture","card_pref":["echo-3060"],"items":[{"id":"one","args":[]}],"entry":"run","seg_min":1,"deadline_min":10,"max_segs":1,"budget_cu":2,"cap_cu":cap,"outputs":"warp:/mnt/sn850x/lanes/jobs/job-1/out"});
+                let spec = json!({"spec":"job-spec/v1","job_id":"job-1","lane":"render-blender","cartridge":"fixture","card_pref":["local-3060"],"items":[{"id":"one","args":[]}],"entry":"run","seg_min":1,"deadline_min":10,"max_segs":1,"budget_cu":2,"cap_cu":cap,"outputs":"worker:/var/lib/diffuser/jobs/job-1/out"});
                 let bytes = serde_json::to_vec(&spec).unwrap(); std::fs::write(f.root.join("spec.json"), &bytes).unwrap();
                 let mut headers = HeaderMap::new(); headers.insert("authorization", "Bearer <TOKEN>".parse().unwrap());
                 let response = h_submit(State(f.app.clone()), AxPath("render-blender".into()), headers, bytes.into()).await;
@@ -908,12 +908,12 @@ mod tests {
         for now in [1000, 1150, 1300, 1450, 1600] {
             f.state(now);
             let mut v: Value = serde_json::from_slice(
-                &std::fs::read(f.root.join("cards/echo-3060.json")).unwrap(),
+                &std::fs::read(f.root.join("cards/local-3060.json")).unwrap(),
             )
             .unwrap();
             v["self_probe"]["epoch"] = json!(now - 121);
             std::fs::write(
-                f.root.join("cards/echo-3060.json"),
+                f.root.join("cards/local-3060.json"),
                 serde_json::to_vec(&v).unwrap(),
             )
             .unwrap();
@@ -930,19 +930,19 @@ mod tests {
     fn live_router_job_prevents_idle() {
         let row =
             json!({"proved":true,"card_state":{"state":"idle","busy":{"by":"none"},"util":0}});
-        assert!(!idle_candidate("echo-3060", &row, true, 10.0));
+        assert!(!idle_candidate("local-3060", &row, true, 10.0));
     }
 
     #[test]
     fn backlog_precedes_standing_and_skips_nonready() {
         let backlog = json!({"jobs":[
-            {"job":"claimed", "card":"echo-3060", "path":"render-blender", "status":"claimed", "args":["/tmp/a"]},
-            {"job":"ready", "card":"echo-3060", "path":"render-blender", "status":"ready", "args":["/tmp/b"]}
+            {"job":"claimed", "card":"local-3060", "path":"render-blender", "status":"claimed", "args":["/tmp/a"]},
+            {"job":"ready", "card":"local-3060", "path":"render-blender", "status":"ready", "args":["/tmp/b"]}
         ]});
         let found = select_candidate(
-            "echo-3060",
+            "local-3060",
             &backlog,
-            "echo-3060\trender-blender\tstanding\t/tmp/c\n",
+            "local-3060\trender-blender\tstanding\t/tmp/c\n",
         )
         .unwrap();
         assert_eq!(
@@ -958,9 +958,9 @@ mod tests {
 
     #[test]
     fn standing_selection_requires_valid_row_and_lane() {
-        let backlog = json!({"jobs":[{"job":"bad", "card":"echo-3060", "path":"unknown", "status":"ready", "args":["/tmp/a"]}]});
-        let rows = "# comment\necho-3060\trender-blender\tshort\necho-3060\trender-blender\tstand-1\t/tmp/b\n";
-        let found = select_candidate("echo-3060", &backlog, rows).unwrap();
+        let backlog = json!({"jobs":[{"job":"bad", "card":"local-3060", "path":"unknown", "status":"ready", "args":["/tmp/a"]}]});
+        let rows = "# comment\nlocal-3060\trender-blender\tshort\nlocal-3060\trender-blender\tstand-1\t/tmp/b\n";
+        let found = select_candidate("local-3060", &backlog, rows).unwrap();
         assert_eq!(found.job, "stand-1");
         assert_eq!(found.backlog_index, None);
         assert!(select_candidate("b70", &backlog, rows).is_none());
@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn busy_via_external_unit() {
         let row = json!({"proved":true,"card_state":{"state":"busy","busy":{"by":"external-unit"},"util":0}});
-        assert!(!idle_candidate("warp-2070", &row, false, 10.0));
+        assert!(!idle_candidate("local-2070", &row, false, 10.0));
     }
 
     #[test]
@@ -982,11 +982,11 @@ mod tests {
     #[test]
     fn observations_require_continuity() {
         let mut tracker = IdleTracker::default();
-        assert_eq!(tracker.observe("echo-3060", 0, true, 150), Some(0));
-        assert_eq!(tracker.observe("echo-3060", 150, true, 150), Some(150));
-        assert_eq!(tracker.observe("echo-3060", 301, true, 150), Some(0));
-        assert_eq!(tracker.observe("echo-3060", 302, false, 150), None);
-        assert_eq!(tracker.observe("echo-3060", 303, true, 150), Some(0));
+        assert_eq!(tracker.observe("local-3060", 0, true, 150), Some(0));
+        assert_eq!(tracker.observe("local-3060", 150, true, 150), Some(150));
+        assert_eq!(tracker.observe("local-3060", 301, true, 150), Some(0));
+        assert_eq!(tracker.observe("local-3060", 302, false, 150), None);
+        assert_eq!(tracker.observe("local-3060", 303, true, 150), Some(0));
     }
 
     #[test]
@@ -996,20 +996,20 @@ mod tests {
         let path = dir.join("events.csv");
         append_event(
             &path,
-            ["100", "echo-3060", "0", "16", "10", "fill", "job,1", "ok"],
+            ["100", "local-3060", "0", "16", "10", "fill", "job,1", "ok"],
         )
         .unwrap();
         append_event(
             &path,
-            ["101", "echo-3060", "0", "16", "10", "idle", "", "ok"],
+            ["101", "local-3060", "0", "16", "10", "idle", "", "ok"],
         )
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             concat!(
                 "ts,card,util,watts,idle_min,action,job,result\n",
-                "100,echo-3060,0,16,10,fill,\"job,1\",ok\n",
-                "101,echo-3060,0,16,10,idle,,ok\n"
+                "100,local-3060,0,16,10,fill,\"job,1\",ok\n",
+                "101,local-3060,0,16,10,idle,,ok\n"
             )
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -1024,25 +1024,25 @@ mod tests {
             ("largest", u64::MAX, u64::MAX, true),
         ] {
             let mut f = Fixture::new(false);
-            f.worker.id = "warp-2070".into();
+            f.worker.id = "local-2070".into();
             f.app.compat["watchdog"]["idle_seconds"] = json!(limit);
             fixture_file(
                 &f.root.join("backlog.json"),
                 json!({"jobs":[{
-                    "job":"job-1", "card":"warp-2070", "lane":"render-blender",
+                    "job":"job-1", "card":"local-2070", "lane":"render-blender",
                     "status":"ready", "args":[f.root.join("spec.json")]
                 }]}).to_string(),
             );
             let mut state: Value = serde_json::from_slice(include_bytes!(
-                "../tests/fixtures/card-state/warp-2070.json"
+                "../tests/fixtures/card-state/local-2070.json"
             ))
             .unwrap();
             state["epoch"] = json!(now);
-            fixture_file(&f.root.join("cards/warp-2070.json"), state.to_string());
+            fixture_file(&f.root.join("cards/local-2070.json"), state.to_string());
             let probe = json!({"epoch":now, "util":state["util"], "watts":state["watts"]});
             let mut w = Watchdog::default();
             w.idle.cards.insert(
-                "warp-2070".into(),
+                "local-2070".into(),
                 Observation {
                     since: 0,
                     last: now.saturating_sub(1),
@@ -1123,19 +1123,19 @@ mod run33_timeout_tests {
                 Timeout::Idle => {
                     let mut idle = IdleTracker::default();
                     for now in [1000, 1150, 1300, 1450] {
-                        idle.observe("warp-2070", now, true, 150);
+                        idle.observe("local-2070", now, true, 150);
                     }
                     let observed = idle
-                        .observe("warp-2070", 1000 + elapsed, true, 151)
+                        .observe("local-2070", 1000 + elapsed, true, 151)
                         .unwrap();
                     assert_eq!(observed, elapsed);
                     assert_eq!(timeout_action(kind, observed, limit), (action, code));
                 }
                 Timeout::Gap => {
                     let mut idle = IdleTracker::default();
-                    assert_eq!(idle.observe("warp-2070", 1000, true, limit), Some(0));
+                    assert_eq!(idle.observe("local-2070", 1000, true, limit), Some(0));
                     assert_eq!(
-                        idle.observe("warp-2070", 1000 + elapsed, true, limit),
+                        idle.observe("local-2070", 1000 + elapsed, true, limit),
                         Some(if action == "reset" { 0 } else { elapsed })
                     );
                 }
@@ -1143,8 +1143,8 @@ mod run33_timeout_tests {
                     let directory = root.join(index.to_string());
                     std::fs::create_dir_all(&directory).unwrap();
                     let mut watchdog = Watchdog::default();
-                    watchdog.alert(&directory, 1000, "warp-2070", "[R]");
-                    watchdog.alert(&directory, 1000 + elapsed, "warp-2070", "[R]");
+                    watchdog.alert(&directory, 1000, "local-2070", "[R]");
+                    watchdog.alert(&directory, 1000 + elapsed, "local-2070", "[R]");
                     assert_eq!(
                         std::fs::read_to_string(directory.join("alerts.log"))
                             .unwrap()

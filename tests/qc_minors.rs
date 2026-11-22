@@ -103,6 +103,7 @@ fn valid_table(text: &str) -> bool {
                 .is_ok_and(|content| n.parse::<usize>().unwrap() <= content.lines().count())
         })
 }
+#[cfg(feature = "contract-docs")]
 #[test]
 fn qc_minor_rows_require_status_and_both_citations() {
     let table = include_str!("../docs/QC-MINORS.md");
@@ -117,6 +118,7 @@ fn qc_minor_rows_require_status_and_both_citations() {
     );
 }
 
+#[cfg(feature = "contract-docs")]
 #[test]
 fn qc_minor_dispositions_are_closed_and_explain_absent_subjects() {
     let table = include_str!("../docs/QC-MINORS.md");
@@ -138,6 +140,7 @@ fn qc_minor_dispositions_are_closed_and_explain_absent_subjects() {
     }
 }
 
+#[cfg(feature = "contract-docs")]
 #[test]
 fn qc_guard_refuses_missing_status_and_either_citation() {
     let valid = "| A/fixture/QC.md:1 | src/main.rs:1 | closed-in-fold | checked |";

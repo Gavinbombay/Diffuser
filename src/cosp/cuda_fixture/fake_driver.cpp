@@ -13,16 +13,16 @@ using Ptr = unsigned long long;
 constexpr Ptr token = 1;
 int handle, context, module, function;
 std::array<float, 16> data{};
-constexpr unsigned char echo[] = {0x2c,0x7f,0x69,0x97,0x8a,0x68,0x83,0x94,0x96,0xd3,0xd3,0x4a,0x03,0x0e,0xd8,0xf6};
-constexpr unsigned char warp[] = {0x45,0x7a,0xbb,0x57,0x78,0x7f,0x5c,0xf6,0x9e,0xd5,0xd7,0x20,0x03,0x0b,0x93,0xf5};
+constexpr unsigned char gpu_a[] = {0x2c,0x7f,0x69,0x97,0x8a,0x68,0x83,0x94,0x96,0xd3,0xd3,0x4a,0x03,0x0e,0xd8,0xf6};
+constexpr unsigned char gpu_b[] = {0x45,0x7a,0xbb,0x57,0x78,0x7f,0x5c,0xf6,0x9e,0xd5,0xd7,0x20,0x03,0x0b,0x93,0xf5};
 bool mode(std::string_view name) { const char* value = std::getenv("CUDA_FIXTURE_CASE"); return value && name == value; }
 void log(const char* msg) { std::fprintf(stderr, "%s\n", msg); }
 int cuInit(unsigned flags) { log("init"); return flags || mode("init-failure"); }
-int cuDeviceGetCount(int* n) { log("count"); *n = mode("echo-only") || mode("warp-only") ? 1 : 2; return 0; }
+int cuDeviceGetCount(int* n) { log("count"); *n = mode("a-only") || mode("b-only") ? 1 : 2; return 0; }
 int cuDeviceGet(int* dev, int ordinal) { *dev = ordinal; return 0; }
 int cuDeviceGetUuid_v2(Uuid* uuid, int ordinal) {
-    bool is_echo = mode("echo-only") || (!mode("warp-only") && ordinal == (mode("reversed") ? 0 : 1));
-    std::memcpy(uuid->bytes, is_echo ? echo : warp, sizeof(uuid->bytes)); return 0;
+    bool is_a = mode("a-only") || (!mode("b-only") && ordinal == (mode("reversed") ? 0 : 1));
+    std::memcpy(uuid->bytes, is_a ? gpu_a : gpu_b, sizeof(uuid->bytes)); return 0;
 }
 int cuCtxCreate_v2(void** ctx, unsigned flags, int dev) {
     std::fprintf(stderr, "context:%d\n", dev);

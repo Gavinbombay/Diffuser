@@ -5,10 +5,7 @@ mod operator;
 use common::{Failure, Result};
 use lane_router::lane_client::{Error as ClientError, Id, Identity, ReceiptStore};
 use serde_json::{json, Value};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{path::Path, process::Command};
 fn validate(root: &Path) -> Result<Value> {
     let data =
         common::read(root.join("BRIEF.md")).map_err(|_| Failure(61, "brief_stale_path_or_host"))?;
@@ -18,7 +15,7 @@ fn validate(root: &Path) -> Result<Value> {
     }
     if !text.contains("0a")
         || !text.contains("ACK.md")
-        || !text.contains("nuc")
+        || !text.contains("controller")
         || regex::Regex::new(r"[A-Za-z]:\\").unwrap().is_match(&text)
     {
         return common::fail(61, "brief_stale_path_or_host");
@@ -28,7 +25,7 @@ fn validate(root: &Path) -> Result<Value> {
         .arg("check")
         .arg("--id")
         .arg(root.file_name().unwrap_or_default())
-        .args(["--lane", "codex-main-nuc", "--dir"])
+        .args(["--lane", "codex-main", "--dir"])
         .arg(root)
         .output()
         .map_err(|_| Failure(66, "qc_gate_blocked"))?;
@@ -38,7 +35,7 @@ fn validate(root: &Path) -> Result<Value> {
     Ok(json!({"valid":true,"brief_sha256":common::hash(data)}))
 }
 fn request(a: &[String], method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    let socket = common::opt(a, "--socket").unwrap_or("/var/lib/uai-diffuser/control.sock".into());
+    let socket = common::opt(a, "--socket").unwrap_or("/var/lib/diffuser/control.sock".into());
     let client = reqwest::blocking::Client::builder()
         .unix_socket(socket)
         .timeout(std::time::Duration::from_secs(20))
@@ -63,102 +60,6 @@ fn request(a: &[String], method: &str, path: &str, body: Option<&Value>) -> Resu
         return common::fail(74, "diffuser_refused");
     }
     Ok(reply)
-}
-fn publish(a: &[String]) -> Result<Value> {
-    let bundle = PathBuf::from(common::opt(a, "--bundle").ok_or(Failure(64, "bundle_required"))?);
-    common::publication_guard(&bundle)?;
-    let manifest = common::value(bundle.join("manifest.json"))?;
-    let id = manifest["bundle_id"]
-        .as_str()
-        .filter(|s| {
-            !s.is_empty()
-                && s.bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        })
-        .ok_or(Failure(67, "bundle_invalid"))?;
-    let scan = String::from_utf8(common::read(bundle.join("SCAN-RECEIPT.txt"))?)
-        .map_err(|_| Failure(67, "scan_receipt_missing_or_nonzero"))?;
-    if !["raw: 0", "unruled: 0", "namegrep: 0"]
-        .iter()
-        .all(|s| scan.contains(s))
-    {
-        return common::fail(67, "scan_receipt_missing_or_nonzero");
-    }
-    if manifest["scan_receipt_sha256"] != json!(common::hash(scan.as_bytes())) {
-        return common::fail(67, "scan_receipt_missing_or_nonzero");
-    }
-    for row in manifest["items"]
-        .as_array()
-        .ok_or(Failure(67, "bundle_invalid"))?
-    {
-        let rel = row["rel_path"]
-            .as_str()
-            .ok_or(Failure(67, "bundle_invalid"))?;
-        if Path::new(rel).is_absolute()
-            || Path::new(rel)
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return common::fail(67, "bundle_invalid");
-        }
-        if common::hash(common::read(bundle.join(rel))?) != row["sha256"] {
-            return common::fail(67, "bundle_digest_mismatch");
-        }
-    }
-    let r = Command::new("sha256sum")
-        .args(["-c", "--quiet", "SHA256SUMS"])
-        .current_dir(&bundle)
-        .output()
-        .map_err(|_| Failure(67, "bundle_digest_mismatch"))?;
-    if !r.status.success() {
-        return common::fail(67, "bundle_digest_mismatch");
-    }
-    let dest = format!("/var/lib/uai-explorer/staged-bundles/{id}");
-    let r = Command::new("ssh")
-        .args([
-            "-n",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "vps",
-            "mkdir",
-            "-p",
-            &dest,
-        ])
-        .output()
-        .map_err(|_| Failure(78, "explorer_auth_unavailable"))?;
-    if !r.status.success() {
-        return common::fail(78, "explorer_auth_unavailable");
-    }
-    let r = Command::new("rsync")
-        .args(["-a", "--", "./", &format!("vps:{dest}/")])
-        .current_dir(&bundle)
-        .output()
-        .map_err(|_| Failure(78, "explorer_auth_unavailable"))?;
-    if !r.status.success() {
-        return common::fail(78, "explorer_auth_unavailable");
-    }
-    let cmd = format!("cd {dest} && sha256sum -c --quiet SHA256SUMS");
-    let r = Command::new("ssh")
-        .args([
-            "-n",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "vps",
-            &cmd,
-        ])
-        .output()
-        .map_err(|_| Failure(79, "explorer_readback_mismatch"))?;
-    if !r.status.success() {
-        return common::fail(79, "explorer_readback_mismatch");
-    }
-    // This is the single E-C receipt. No catalog mutation is attempted without custody.
-    Ok(
-        json!({"bundle_id":id,"bundle_sha256":common::hash(common::read(bundle.join("manifest.json"))?),"state":"staged_import_unverified","remote_path":dest,"remote_manifest_verified":true,"import_action":null,"import_action_verified":false,"slugs_verified":false}),
-    )
 }
 fn diffuser(args: &[String]) -> Result<Value> {
     match args {
@@ -199,7 +100,6 @@ fn run(a: &[String]) -> Result<Value> {
                 .ok_or(Failure(62, "ack_missing_or_stale"))?;
             common::ack_at(Path::new(&root), a.iter().any(|s| s == "--post"))
         }
-        Some("explorer-publish") => publish(a),
         Some("diffuser") => diffuser(&a[1..]),
         Some("ready") => {
             let action = a

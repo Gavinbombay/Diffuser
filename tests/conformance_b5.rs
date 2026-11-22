@@ -466,12 +466,12 @@ fn conformance_b5_limits() {
         if spec.get("job_id").is_none() {
             row["job_id"] = json!(format!("job-{}", spec["lane"].as_str().unwrap()));
         }
-        deadline::dispatch(&mut row, "echo-3060", now).unwrap();
+        deadline::dispatch(&mut row, "local-3060", now).unwrap();
         deadline::accept(&mut row, now).unwrap();
         deadline::report(&mut row, 0, None, now).unwrap();
         deadline::merge(&mut row, got.is_ok(), now).unwrap();
         row["spec_sha256"] = json!(deadline::fingerprint(spec));
-        row["chunks"] = json!([{"worker":"echo-3060"}]);
+        row["chunks"] = json!([{"worker":"local-3060"}]);
         row["artifacts"] = json!(arts);
         row["state"] = actual["outcome"].clone();
         row["reason"] = actual["reason"].clone();
