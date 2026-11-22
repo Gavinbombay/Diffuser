@@ -44,3 +44,9 @@ All six leads identified during the full high-effort pass were remediated and in
 - **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`), 4-iteration delta verification.
 - **Closed findings**: Post-backoff Colab retry state race (`recheck_retry_admission` verifies CU balance/floor, active sessions, and VM cap after backoff), aggregate-only exact-pin admission (`PinnedLiveFree::NoReport` fails closed for exact pins with positive VRAM minimums), and stale per-GPU telemetry reuse on omitted heartbeats (`handle_heartbeat` clears `gpus_live_json` when omitted).
 - **Result**: `CLEAN_PASS` (`0` open confirmed findings, `0` open `needs_validation`, `12/12` fleet tests + `43/43` Colab adapter tests passing, both Node validators exit `0`).
+
+## Adapters v3 Delta Audit (2026-11-22)
+
+- **Scope**: `adapters/colab/colab_weight_cache.sh`, `adapters/colab/tests/test_colab_weight_cache.py`, `adapters/gamer-idle/gamer_idle_guard.py`, `adapters/gamer-idle/config.example.json`, `adapters/gamer-idle/README.md`, and `adapters/gamer-idle/tests/test_gamer_idle_guard.py`.
+- **Auditor**: Codex Luna (`gpt-6-luna`, `reasoning effort: high`).
+- **Result**: `CLEAN_PASS` (`0` open confirmed findings, `0` open `needs_validation`, `32/32` unit tests passing in isolated `bwrap` sandbox, both Node validators exit `0`).
