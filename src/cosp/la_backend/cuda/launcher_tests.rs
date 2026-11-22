@@ -19,7 +19,7 @@ const CHILD: &str = r#"
 #include <unistd.h>
 extern char **environ;
 int main(int argc, char **argv) {
-    static const char *pin = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
+    static const char *pin = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
     if (argc != 2 || strcmp(argv[1], pin) || environ[0]) return 21;
     for (int fd = 3; fd < 64; ++fd) {
         if (fcntl(fd, F_GETFD) != -1 || errno != EBADF) return 22;
@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#;
-const PIN: &str = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
+const PIN: &str = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const OTHER: &str = "GPU-00000000-0000-0000-0000-000000000001";
 const ADDRESS_SPACE: u64 = 16 * 1024 * 1024;
 const INPUT: &[u8] = br#"{"schema_version":"diffuser-private-cuda-input/v1","workload":"add_one"}"#;

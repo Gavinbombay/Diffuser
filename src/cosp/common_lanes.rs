@@ -1,6 +1,6 @@
 #[path = "common.rs"]
 mod core;
-pub use core::{args, emit, fail, hash, opt, read, Failure, Result};
+pub use core::{args, emit, fail, hash, opt, qc_gate_path, read, Failure, Result};
 #[path = "common_io.rs"]
 mod io;
 pub use io::value;

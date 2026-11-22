@@ -11,11 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const PINNED_UUID: &str = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
-const PINNED_SHA256: [u8; 32] = [
-    0x2b, 0x28, 0x13, 0xc1, 0x99, 0x22, 0xd0, 0x99, 0xd8, 0x3a, 0x46, 0x92, 0x1f, 0x1e, 0x59, 0x84,
-    0x6e, 0x78, 0x96, 0x51, 0xfe, 0x1f, 0x97, 0x05, 0x6f, 0x82, 0xc5, 0x5f, 0x4f, 0x10, 0x44, 0x96,
-];
 const UNAVAILABLE: &str = "capability_unavailable";
 const MAX_ELF_BYTES: u64 = 1024 * 1024;
 
@@ -29,32 +24,6 @@ pub(in crate::cosp) struct CudaProcess {
 }
 
 impl CudaProcess {
-    /// For future trusted W bootstrap only, before process sealing. The caller
-    /// must already own the artifact fd and the qualified execution domain,
-    /// including its driver/interpreter, device scope and spawning thread.
-    /// This function neither authenticates a worker nor grants admission.
-    #[allow(dead_code)] // No ordinary startup caller is authorized yet.
-    pub(in crate::cosp) fn launch_native(
-        artifact: File,
-        expected_sha256: [u8; 32],
-        pin: DeviceUuid,
-        address_space_bytes: u64,
-    ) -> Result<Self, &'static str> {
-        if expected_sha256 != PINNED_SHA256 || pin.as_str() != PINNED_UUID {
-            return Err(UNAVAILABLE);
-        }
-        // The read-only executable mount is necessary, not sufficient: trusted
-        // startup must also control the backing store and all writable aliases.
-        let mut mount = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        if unsafe { libc::fstatvfs(artifact.as_raw_fd(), mount.as_mut_ptr()) } != 0
-            || unsafe { mount.assume_init() }.f_flag & (libc::ST_RDONLY | libc::ST_NOEXEC)
-                != libc::ST_RDONLY
-        {
-            return Err(UNAVAILABLE);
-        }
-        Self::launch_verified(artifact, expected_sha256, pin, address_space_bytes)
-    }
-
     /// Protected startup native CUDA launcher for any configured qualified GPU
     /// via its exact configured GPU UUID. Enforces exact ELF
     /// SHA-256 verification, finite nonzero address-space cap, `/proc/self/fd`
@@ -96,6 +65,8 @@ impl CudaProcess {
         )
     }
 
+    // Startup uses launch_native_configured; this path is exercised by the launcher tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn launch_verified(
         artifact: File,
         expected_sha256: [u8; 32],
@@ -125,6 +96,7 @@ impl CudaProcess {
         Self::spawn(cmd, trace.into(), pin, 16 * 1024 * 1024)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // Callers are test-only; see launch_verified.
     fn spawn(
         cmd: Command,
         stderr: Stdio,

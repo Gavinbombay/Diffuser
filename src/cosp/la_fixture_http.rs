@@ -261,7 +261,7 @@ async fn operator(f: &Family, auth: bool, args: &[&str], status: i32) -> Value {
 #[tokio::test]
 #[ignore = "requires DIFFUSER_TEST_CLI and the private offline walkthrough runner"]
 async fn operator_cpu_and_cuda_process_walkthrough() {
-    const UUID: &str = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
+    const UUID: &str = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
     const OTHER: &str = "GPU-11111111-1111-1111-1111-111111111111";
     for (case, cpu) in [("normal", true), ("cuda-b", false)] {
         let (mut f, listener) = start_http(case).await;

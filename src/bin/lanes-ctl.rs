@@ -21,7 +21,7 @@ fn validate(root: &Path) -> Result<Value> {
         return common::fail(61, "brief_stale_path_or_host");
     }
     let r = Command::new("python3")
-        .arg("/srv/lanes/bin/qc_gate.py")
+        .arg(common::qc_gate_path())
         .arg("check")
         .arg("--id")
         .arg(root.file_name().unwrap_or_default())

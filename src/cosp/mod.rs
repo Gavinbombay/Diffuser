@@ -85,6 +85,11 @@ fn worker_call(s: &Spine, id: &str, path: &str, body: Option<&Value>) -> Result<
             None,
         );
     }
+    // SSH host alias that relays embed-worker calls. Set `DIFFUSER_RELAY_HOST` to override.
+    let relay = std::env::var("DIFFUSER_RELAY_HOST")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "relay".into());
     let mut c = Command::new("ssh");
     c.args([
         "-T",
@@ -94,7 +99,7 @@ fn worker_call(s: &Spine, id: &str, path: &str, body: Option<&Value>) -> Result<
         "StrictHostKeyChecking=yes",
         "-o",
         "ConnectTimeout=10",
-        "vps",
+        relay.as_str(),
         "curl",
         "-fsS",
         "--max-time",
@@ -469,7 +474,7 @@ pub fn validate_brief(root: &std::path::Path) -> Result<Value> {
         return common::fail(61, "brief_stale_path_or_host");
     }
     let r = Command::new("python3")
-        .arg("/srv/lanes/bin/qc_gate.py")
+        .arg(common::qc_gate_path())
         .arg("check")
         .arg("--id")
         .arg(root.file_name().unwrap_or_default())

@@ -9,8 +9,8 @@ use lane_router::lane_client::{
 };
 use serde::Serialize;
 
-const GPU_A: &str = "GPU-2c7f6997-8a68-8394-96d3-d34a030ed8f6";
-const GPU_B: &str = "GPU-457abb57-787f-5cf6-9ed5-d720030b93f5";
+const GPU_A: &str = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const GPU_B: &str = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const API: &str = "compute.cuda.add-one/v1";
 const BACKEND: &str = "cuda-private-add-one/v1";
 const CUDA_BODY: &[u8] =

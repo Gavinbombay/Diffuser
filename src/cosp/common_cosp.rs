@@ -1,6 +1,6 @@
 #[path = "common.rs"]
 mod core;
-pub use core::{args, emit, fail, hash, now, opt, read, Failure, Result};
+pub use core::{args, emit, fail, hash, now, opt, qc_gate_path, read, Failure, Result};
 #[path = "common_time.rs"]
 mod time;
 pub use time::timestamp;

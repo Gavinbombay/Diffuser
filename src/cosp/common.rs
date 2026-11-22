@@ -17,6 +17,13 @@ pub fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+/// Script run by `validate-brief`. Set `DIFFUSER_QC_GATE` to use another path.
+pub fn qc_gate_path() -> std::path::PathBuf {
+    std::env::var_os("DIFFUSER_QC_GATE")
+        .filter(|v| !v.is_empty())
+        .map(Into::into)
+        .unwrap_or_else(|| "/usr/local/lib/diffuser/qc_gate.py".into())
+}
 pub fn hash(data: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(data.as_ref()))
 }
