@@ -1,19 +1,22 @@
 //! Diffuser v1.0 Scalable Multi-Worker Fleet Router, Pluggable Workload Runner & MCP Surface.
 //!
-//! Mounted under `/v1/fleet/*` on `diffuser` when `--fleet-config <path>` is supplied.
+//! Mounted under `/v1/fleet/*` on `uai-diffuser` when `--fleet-config <path>` is supplied.
 //! When `--fleet-config` is omitted, `/v1/fleet/*` fails closed with `503 fleet_closed`.
 
 use axum::{
-    body::Bytes,
-    extract::{Path as AxPath, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    body::{Body, Bytes},
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        DefaultBodyLimit, FromRequest, Path as AxPath, Query, Request, State,
+    },
+    http::{header, HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use lane_router::transport::{private_http_client, private_http_url};
 use reqwest::Url;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,6 +33,9 @@ use std::{
 use subtle::ConstantTimeEq;
 
 const HEARTBEAT_TTL_MS: u64 = 45_000;
+const MAX_DRAIN_BODY_BYTES: usize = 4 * 1024;
+const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
+const FLEET_UI_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 const MAX_RPC_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const RPC_MAX_AGE_MS: u64 = 60_000;
@@ -339,6 +345,22 @@ fn add_capacity_released_column(conn: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+fn add_operator_drained_column(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fleet_workers') WHERE name='operator_drained')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute_batch(
+            "ALTER TABLE fleet_workers ADD COLUMN operator_drained INTEGER NOT NULL DEFAULT 0 CHECK (operator_drained IN (0,1));
+             UPDATE fleet_workers SET operator_drained=1 WHERE status='draining';",
+        )?;
+    }
+    tx.commit()
+}
+
 fn err_resp(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
@@ -348,6 +370,14 @@ fn err_resp(status: StatusCode, code: &str, message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+type FleetResult<T> = Result<T, (StatusCode, &'static str)>;
+const STORAGE_UNAVAILABLE: (StatusCode, &str) =
+    (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
+
+fn invalid_request(message: &str) -> Response {
+    err_resp(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
 }
 
 fn bearer_from_headers(headers: &HeaderMap) -> Option<&str> {
@@ -444,6 +474,10 @@ impl FleetState {
                  updated_at_ms INTEGER NOT NULL,
                  UNIQUE(actor, project, idempotency_key)
              );
+             CREATE INDEX IF NOT EXISTS fleet_jobs_created_idx
+                 ON fleet_jobs (created_at_ms DESC, job_id DESC);
+             CREATE INDEX IF NOT EXISTS fleet_jobs_scope_created_idx
+                 ON fleet_jobs (actor, project, created_at_ms DESC, job_id DESC);
              CREATE TABLE IF NOT EXISTS fleet_artifacts (
                  artifact_id TEXT PRIMARY KEY,
                  actor TEXT NOT NULL,
@@ -458,6 +492,7 @@ impl FleetState {
         add_rpc_session_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
         add_capacity_released_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
         add_live_gpu_columns(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
+        add_operator_drained_column(&mut conn).map_err(|e| format!("fleet_schema:{e}"))?;
 
         let http = private_http_client()
             .timeout(rpc_http_timeout(MAX_JOB_TIMEOUT_SECS))
@@ -551,8 +586,10 @@ pub(super) fn closed_router() -> Router<super::Spine> {
         .route("/workers/{worker_id}/drain", post(closed))
         .route("/tokens", post(closed))
         .route("/tokens/{token_id}/revoke", post(closed))
-        .route("/jobs", post(closed))
+        .route("/jobs", get(closed).post(closed))
         .route("/jobs/{job_id}", get(closed))
+        .route("/ui", get(closed))
+        .route("/ui/", get(closed))
         .route("/artifacts", post(closed))
         .route("/artifacts/{artifact_id}", get(closed))
         .route("/artifacts/{artifact_id}/content", get(closed))
@@ -566,16 +603,45 @@ pub(super) fn router(cfg_path: &Path, state_dir: &Path) -> Result<Router<super::
         .route("/workers", get(handle_list_workers))
         .route("/workers/enroll", post(handle_enroll))
         .route("/workers/{worker_id}/heartbeat", post(handle_heartbeat))
-        .route("/workers/{worker_id}/drain", post(handle_drain))
+        .route(
+            "/workers/{worker_id}/drain",
+            post(handle_drain).layer(DefaultBodyLimit::max(MAX_DRAIN_BODY_BYTES)),
+        )
         .route("/tokens", post(handle_issue_token))
         .route("/tokens/{token_id}/revoke", post(handle_revoke_token))
-        .route("/jobs", post(handle_submit_job))
+        .route("/jobs", get(handle_list_jobs).post(handle_submit_job))
         .route("/jobs/{job_id}", get(handle_get_job))
+        .route("/ui", get(handle_ui))
+        .route("/ui/", get(handle_ui_redirect))
         .route("/artifacts", post(handle_upload_artifact).layer(axum::extract::DefaultBodyLimit::max(MAX_ARTIFACT_BYTES)))
         .route("/artifacts/{artifact_id}", get(handle_get_artifact_manifest))
         .route("/artifacts/{artifact_id}/content", get(handle_get_artifact_content))
         .route("/mcp", post(handle_mcp))
         .with_state(state))
+}
+
+async fn handle_ui() -> Response {
+    (
+        [
+            (header::CONTENT_SECURITY_POLICY, FLEET_UI_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Html(include_str!("fleet_ui.html")),
+    )
+        .into_response()
+}
+
+async fn handle_ui_redirect() -> Response {
+    (
+        StatusCode::PERMANENT_REDIRECT,
+        [
+            (header::LOCATION, "/v1/fleet/ui"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -613,7 +679,7 @@ async fn handle_enroll(
     let Ok(conn) = state.db.lock() else {
         return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
     };
-    let res = conn.execute(
+    let status = conn.query_row(
         "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, cpu_reserved, ram_reserved, vram_reserved, gpus_json, capabilities_json, status, last_heartbeat_ms, rpc_session)
          VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,0,?8,?9,'active',?10,?11)
          ON CONFLICT(worker_id) DO UPDATE SET
@@ -626,11 +692,23 @@ async fn handle_enroll(
            vram_total=excluded.vram_total,
            gpus_json=excluded.gpus_json,
            capabilities_json=excluded.capabilities_json,
-           status='active',
-           cpu_reserved=CASE WHEN EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running') THEN fleet_workers.cpu_reserved ELSE 0 END,
-           ram_reserved=CASE WHEN EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running') THEN fleet_workers.ram_reserved ELSE 0 END,
-           vram_reserved=CASE WHEN EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running') THEN fleet_workers.vram_reserved ELSE 0 END,
-           last_heartbeat_ms=excluded.last_heartbeat_ms",
+           status=CASE
+               WHEN fleet_workers.status='quarantined' AND fleet_workers.rpc_session=excluded.rpc_session THEN 'quarantined'
+               WHEN fleet_workers.operator_drained=1 THEN 'draining' ELSE 'active' END,
+           cpu_reserved=CASE
+               WHEN fleet_workers.status='quarantined' AND fleet_workers.rpc_session=excluded.rpc_session
+                 OR EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running')
+               THEN fleet_workers.cpu_reserved ELSE 0 END,
+           ram_reserved=CASE
+               WHEN fleet_workers.status='quarantined' AND fleet_workers.rpc_session=excluded.rpc_session
+                 OR EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running')
+               THEN fleet_workers.ram_reserved ELSE 0 END,
+           vram_reserved=CASE
+               WHEN fleet_workers.status='quarantined' AND fleet_workers.rpc_session=excluded.rpc_session
+                 OR EXISTS(SELECT 1 FROM fleet_jobs WHERE worker_id=excluded.worker_id AND state='running')
+               THEN fleet_workers.vram_reserved ELSE 0 END,
+           last_heartbeat_ms=excluded.last_heartbeat_ms
+         RETURNING status",
         params![
             req.worker_id,
             req.host,
@@ -644,15 +722,16 @@ async fn handle_enroll(
             ts,
             req.rpc_session,
         ],
+        |row| row.get::<_, String>(0),
     );
-    if res.is_err() {
+    let Ok(status) = status else {
         return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "enroll write failed");
-    }
+    };
     Json(json!({
         "schema_version": "diffuser-fleet/v1",
         "enrolled": true,
         "worker_id": req.worker_id,
-        "status": "active",
+        "status": status,
         "heartbeat_ms": ts
     }))
     .into_response()
@@ -748,23 +827,90 @@ async fn handle_heartbeat(
 
 async fn handle_drain(
     State(state): State<FleetState>,
-    headers: HeaderMap,
     AxPath(worker_id): AxPath<String>,
+    request: Request,
 ) -> Response {
-    if !state.check_admin(&headers) {
+    if !state.check_admin(request.headers()) {
         return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
     }
-    let Ok(conn) = state.db.lock() else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+    let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
+    let bytes = match Bytes::from_request(request, &()).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return err_resp(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request",
+                "body exceeds 4 KiB",
+            )
+        }
+        Err(_) => return invalid_request("unable to read body"),
     };
-    match conn.execute(
-        "UPDATE fleet_workers SET status='draining' WHERE worker_id=?1",
-        [&worker_id],
-    ) {
-        Ok(0) => err_resp(StatusCode::NOT_FOUND, "worker_not_found", "unknown worker_id"),
-        Ok(_) => Json(json!({"ok": true, "worker_id": worker_id, "status": "draining"})).into_response(),
-        Err(_) => err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "drain write failed"),
+    let accepting = if bytes.is_empty() {
+        false
+    } else {
+        let is_object = bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{');
+        let mut request = Request::new(Body::from(bytes));
+        if let Some(content_type) = content_type {
+            request
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, content_type);
+        }
+        match Json::<DrainBody>::from_request(request, &()).await {
+            Ok(Json(body)) if is_object => body.accepting,
+            Err(JsonRejection::MissingJsonContentType(_)) => {
+                return err_resp(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "invalid_request",
+                    "JSON body required",
+                );
+            }
+            _ => return invalid_request("invalid worker admission body"),
+        }
+    };
+    match set_worker_accepting_inner(&state, &worker_id, accepting) {
+        Ok(value) => Json(value).into_response(),
+        Err((status, code)) => err_resp(status, code, "worker admission update failed"),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DrainBody {
+    #[serde(default)]
+    accepting: bool,
+}
+
+fn set_worker_accepting_inner(
+    state: &FleetState,
+    worker_id: &str,
+    accepting: bool,
+) -> FleetResult<Value> {
+    let mut conn = state.db.lock().map_err(|_| STORAGE_UNAVAILABLE)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| STORAGE_UNAVAILABLE)?;
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM fleet_workers WHERE worker_id=?1",
+            [worker_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| STORAGE_UNAVAILABLE)?;
+    let status = match (status.as_deref(), accepting) {
+        (None, _) => return Err((StatusCode::NOT_FOUND, "worker_not_found")),
+        (Some("quarantined"), true) => return Err((StatusCode::CONFLICT, "worker_quarantined")),
+        (Some("quarantined"), false) => "quarantined",
+        (Some(_), true) => "active",
+        (Some(_), false) => "draining",
+    };
+    tx.execute(
+        "UPDATE fleet_workers SET operator_drained=?1, status=?2 WHERE worker_id=?3",
+        params![!accepting, status, worker_id],
+    )
+    .map_err(|_| STORAGE_UNAVAILABLE)?;
+    tx.commit().map_err(|_| STORAGE_UNAVAILABLE)?;
+    Ok(json!({"ok": true, "worker_id": worker_id, "status": status}))
 }
 
 fn list_workers_json(state: &FleetState) -> Result<Vec<Value>, &'static str> {
@@ -976,14 +1122,24 @@ async fn handle_revoke_token(
     if !state.check_admin(&headers) {
         return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
     }
-    let Ok(conn) = state.db.lock() else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
-    };
-    match conn.execute("UPDATE fleet_tokens SET revoked=1 WHERE token_id=?1", [&token_id]) {
-        Ok(0) => err_resp(StatusCode::NOT_FOUND, "token_not_found", "unknown token_id"),
-        Ok(_) => Json(json!({"ok": true, "token_id": token_id, "revoked": true})).into_response(),
-        Err(_) => err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "revoke failed"),
+    match revoke_token_inner(&state, &token_id) {
+        Ok(value) => Json(value).into_response(),
+        Err((status, code)) => err_resp(status, code, "revoke failed"),
     }
+}
+
+fn revoke_token_inner(state: &FleetState, token_id: &str) -> FleetResult<Value> {
+    let conn = state.db.lock().map_err(|_| STORAGE_UNAVAILABLE)?;
+    let count = conn
+        .execute(
+            "UPDATE fleet_tokens SET revoked=1 WHERE token_id=?1",
+            [token_id],
+        )
+        .map_err(|_| STORAGE_UNAVAILABLE)?;
+    if count == 0 {
+        return Err((StatusCode::NOT_FOUND, "token_not_found"));
+    }
+    Ok(json!({"ok": true, "token_id": token_id, "revoked": true}))
 }
 
 #[derive(Clone, Deserialize)]
@@ -1712,21 +1868,179 @@ async fn handle_submit_job(
     }
 }
 
-fn get_job_inner(state: &FleetState, auth: &CallerAuth, job_id: &str) -> Result<Value, (StatusCode, &'static str)> {
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct JobListFilters {
+    #[serde(deserialize_with = "present_value")]
+    limit: Option<u16>,
+    #[serde(deserialize_with = "present_value")]
+    state: Option<String>,
+    #[serde(deserialize_with = "present_value")]
+    capability: Option<String>,
+    #[serde(deserialize_with = "present_value")]
+    worker_id: Option<String>,
+}
+
+fn present_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+impl JobListFilters {
+    fn is_valid(&self) -> bool {
+        (1..=200).contains(&self.limit.unwrap_or(50))
+            && [&self.state, &self.capability, &self.worker_id]
+                .into_iter()
+                .flatten()
+                .all(|value| !value.trim().is_empty())
+    }
+}
+
+#[derive(Serialize)]
+struct JobSummary {
+    job_id: String,
+    idempotency_key: String,
+    actor: String,
+    project: String,
+    capability: String,
+    worker_id: String,
+    gpu_uuid: Option<String>,
+    state: String,
+    output_sha256: Option<String>,
+    error_code: Option<String>,
+    capacity_released: bool,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+fn list_jobs_inner(
+    state: &FleetState,
+    auth: &CallerAuth,
+    filters: &JobListFilters,
+) -> FleetResult<Value> {
+    let conn = state.db.lock().map_err(|_| STORAGE_UNAVAILABLE)?;
+    let mut sql = String::from(
+        "SELECT job_id, idempotency_key, actor, project, capability, worker_id, gpu_uuid, state,
+                output_sha256, error_code, capacity_released, created_at_ms, updated_at_ms
+         FROM fleet_jobs WHERE 1=1",
+    );
+    let mut values: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    if !auth.is_admin {
+        sql.push_str(" AND actor=? AND project=?");
+        values.extend([&auth.actor as &dyn rusqlite::ToSql, &auth.project]);
+    }
+    for (predicate, filter) in [
+        (" AND state=?", &filters.state),
+        (" AND capability=?", &filters.capability),
+        (" AND worker_id=?", &filters.worker_id),
+    ] {
+        if let Some(value) = filter {
+            sql.push_str(predicate);
+            values.push(value);
+        }
+    }
+    let limit = filters.limit.unwrap_or(50);
+    sql.push_str(" ORDER BY created_at_ms DESC, job_id DESC LIMIT ?");
+    values.push(&limit);
+    let mut stmt = conn.prepare(&sql).map_err(|_| STORAGE_UNAVAILABLE)?;
+    let jobs = stmt
+        .query_map(params_from_iter(values), |row| {
+            Ok(JobSummary {
+                job_id: row.get(0)?,
+                idempotency_key: row.get(1)?,
+                actor: row.get(2)?,
+                project: row.get(3)?,
+                capability: row.get(4)?,
+                worker_id: row.get(5)?,
+                gpu_uuid: row.get(6)?,
+                state: row.get(7)?,
+                output_sha256: row.get(8)?,
+                error_code: row.get(9)?,
+                capacity_released: row.get::<_, i64>(10)? != 0,
+                created_at_ms: row.get(11)?,
+                updated_at_ms: row.get(12)?,
+            })
+        })
+        .map_err(|_| STORAGE_UNAVAILABLE)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| STORAGE_UNAVAILABLE)?;
+    Ok(json!({"schema_version": "diffuser-fleet/v1", "jobs": jobs}))
+}
+
+async fn list_jobs(
+    state: FleetState,
+    auth: CallerAuth,
+    filters: JobListFilters,
+) -> FleetResult<Value> {
+    tokio::task::spawn_blocking(move || list_jobs_inner(&state, &auth, &filters))
+        .await
+        .map_err(|_| STORAGE_UNAVAILABLE)?
+}
+
+async fn handle_list_jobs(
+    State(state): State<FleetState>,
+    headers: HeaderMap,
+    query: Result<Query<JobListFilters>, QueryRejection>,
+) -> Response {
+    let auth = match state.authenticate(&headers) {
+        Ok(auth) => auth,
+        Err((status, code)) => return err_resp(status, code, "authentication failed"),
+    };
+    let Ok(Query(filters)) = query else {
+        return invalid_request("invalid job list filters");
+    };
+    if !filters.is_valid() {
+        return invalid_request("invalid job list filters");
+    }
+    match list_jobs(state, auth, filters).await {
+        Ok(value) => (NO_STORE, Json(value)).into_response(),
+        Err((status, code)) => err_resp(status, code, "job list failed"),
+    }
+}
+
+#[derive(Deserialize)]
+struct JobDetailQuery {
+    #[serde(default)]
+    include_input: bool,
+}
+
+fn get_job_inner(
+    state: &FleetState,
+    auth: &CallerAuth,
+    job_id: &str,
+    include_input: bool,
+) -> FleetResult<Value> {
     let conn = state
         .db
         .lock()
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"))?;
-    let row: Option<(String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>, i64, i64, i64)> = conn
+    let row: Option<(String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>, i64, i64, i64, Option<String>)> = conn
         .query_row(
-            "SELECT actor, project, capability, worker_id, gpu_uuid, state, output_json, output_sha256, error_code, capacity_released, created_at_ms, updated_at_ms
+            "SELECT actor, project, capability, worker_id, gpu_uuid, state, output_json, output_sha256, error_code, capacity_released, created_at_ms, updated_at_ms,
+                    CASE WHEN ?2 THEN input_json END
              FROM fleet_jobs WHERE job_id=?1",
-            [job_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?)),
+            params![job_id, include_input],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?, r.get(12)?)),
         )
         .optional()
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"))?;
-    let Some((actor, project, capability, worker_id, gpu_uuid, st, out_j, out_sha, err_c, released, c_at, u_at)) = row else {
+    let Some((
+        actor,
+        project,
+        capability,
+        worker_id,
+        gpu_uuid,
+        st,
+        out_j,
+        out_sha,
+        err_c,
+        released,
+        c_at,
+        u_at,
+        input,
+    )) = row
+    else {
         return Err((StatusCode::NOT_FOUND, "job_not_found"));
     };
     if !auth.is_admin && (actor != auth.actor || project != auth.project) {
@@ -1736,7 +2050,7 @@ fn get_job_inner(state: &FleetState, auth: &CallerAuth, job_id: &str) -> Result<
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(Value::Null);
-    Ok(json!({
+    let mut result = json!({
         "schema_version": "diffuser-fleet/v1",
         "job_id": job_id,
         "actor": actor,
@@ -1751,20 +2065,28 @@ fn get_job_inner(state: &FleetState, auth: &CallerAuth, job_id: &str) -> Result<
         "capacity_released": released != 0,
         "created_at_ms": c_at,
         "updated_at_ms": u_at
-    }))
+    });
+    if let Some(input) = input {
+        result["input"] = serde_json::from_str(&input).map_err(|_| STORAGE_UNAVAILABLE)?;
+    }
+    Ok(result)
 }
 
 async fn handle_get_job(
     State(state): State<FleetState>,
     headers: HeaderMap,
     AxPath(job_id): AxPath<String>,
+    query: Result<Query<JobDetailQuery>, QueryRejection>,
 ) -> Response {
     let auth = match state.authenticate(&headers) {
         Ok(a) => a,
         Err((st, code)) => return err_resp(st, code, "authentication failed"),
     };
-    match get_job_inner(&state, &auth, &job_id) {
-        Ok(v) => Json(v).into_response(),
+    let Ok(Query(query)) = query else {
+        return invalid_request("invalid job detail query");
+    };
+    match get_job_inner(&state, &auth, &job_id, query.include_input) {
+        Ok(v) => (NO_STORE, Json(v)).into_response(),
         Err((st, code)) => err_resp(st, code, "job read failed"),
     }
 }
@@ -1917,45 +2239,90 @@ async fn handle_get_artifact_content(
 
 // === MCP JSON-RPC 2.0 Surface (/v1/fleet/mcp) ===
 
-async fn handle_mcp(
-    State(state): State<FleetState>,
-    headers: HeaderMap,
-    Json(req): Json<Value>,
-) -> Response {
-    let auth = match state.authenticate(&headers) {
+async fn handle_mcp(State(state): State<FleetState>, request: Request) -> Response {
+    let auth = match state.authenticate(request.headers()) {
         Ok(a) => a,
         Err((st, code)) => return err_resp(st, code, "authentication failed"),
     };
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+    let req = match Json::<Value>::from_request(request, &()).await {
+        Ok(Json(req)) => req,
+        Err(JsonRejection::JsonSyntaxError(_) | JsonRejection::JsonDataError(_)) => {
+            return mcp_error(&Value::Null, -32700, "parse error");
+        }
+        Err(error) => return error.into_response(),
+    };
+    let id = req.get("id");
+    let method = req
+        .get("method")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let valid_id = id.is_none_or(|id| id.is_string() || id.is_i64() || id.is_u64());
+    let Some(method) = method.filter(|_| req["jsonrpc"] == "2.0" && valid_id) else {
+        return mcp_error(&Value::Null, -32600, "invalid request");
+    };
+    // Notifications have no response envelope and never execute a tool.
+    let Some(id) = id else {
+        return (StatusCode::ACCEPTED, NO_STORE).into_response();
+    };
+    let params = req.get("params");
+    if matches!(
+        method,
+        "initialize" | "tools/list" | "notifications/initialized" | "ping"
+    ) {
+        let valid = params.is_none_or(|params| {
+            params.as_object().is_some_and(|object| {
+                !matches!(method, "notifications/initialized" | "ping") || object.is_empty()
+            })
+        });
+        if !valid {
+            return mcp_invalid_params(id);
+        }
+    }
     match method {
-        "initialize" => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": { "name": "diffuser-fleet", "version": "1.0.0" },
-                "capabilities": { "tools": {} }
-            }
-        }))
-        .into_response(),
-        "tools/list" => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "tools": [
-                    {"name": "fleet_discover", "description": "Discover live Diffuser capabilities and available CPU/GPU capacity.", "inputSchema": {"type": "object", "properties": {}}},
-                    {"name": "fleet_list_workers", "description": "List all enrolled Diffuser workers and live resources (admin).", "inputSchema": {"type": "object", "properties": {}}},
-                    {"name": "fleet_submit_job", "description": "Submit an idempotent job by capability and optional exact GPU UUID. Set async true to return while the job is still running.", "inputSchema": {"type": "object", "required": ["capability", "idempotency_key"], "properties": {"capability": {"type": "string"}, "idempotency_key": {"type": "string"}, "pin_gpu_uuid": {"type": "string"}, "input": {"type": "object"}, "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 21600}, "async": {"type": "boolean"}}}},
-                    {"name": "fleet_get_job", "description": "Read durable job status and verified output digest.", "inputSchema": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}}},
-                    {"name": "fleet_issue_token", "description": "Issue a scoped caller token for a human or agent (admin).", "inputSchema": {"type": "object", "required": ["actor", "project", "allowed_capabilities"], "properties": {"actor": {"type": "string"}, "project": {"type": "string"}, "allowed_capabilities": {"type": "array", "items": {"type": "string"}}}}}
-                ]
-            }
-        }))
-        .into_response(),
+        "notifications/initialized" => mcp_result(id, Value::Null),
+        "ping" => mcp_result(id, json!({})),
+        "initialize" => mcp_result(
+            id,
+            json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": { "name": "diffuser-fleet", "version": "1.0.0" },
+                    "capabilities": { "tools": {} }
+            }),
+        ),
+        "tools/list" => mcp_result(
+            id,
+            json!({
+                    "tools": [
+                        {"name": "fleet_discover", "description": "Discover live Diffuser capabilities and available CPU/GPU capacity.", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "fleet_list_workers", "description": "List all enrolled Diffuser workers and live resources (admin).", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "fleet_submit_job", "description": "Submit an idempotent job by capability and optional exact GPU UUID. Set async true to return while the job is still running.", "inputSchema": {"type": "object", "required": ["capability", "idempotency_key"], "properties": {"capability": {"type": "string"}, "idempotency_key": {"type": "string"}, "pin_gpu_uuid": {"type": "string"}, "input": {"type": "object"}, "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 21600}, "async": {"type": "boolean"}}}},
+                        {"name": "fleet_get_job", "description": "Read durable job status and verified output digest.", "inputSchema": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}}},
+                        {"name": "fleet_issue_token", "description": "Issue a scoped caller token for a human or agent (admin).", "inputSchema": {"type": "object", "required": ["actor", "project", "allowed_capabilities"], "properties": {"actor": {"type": "string"}, "project": {"type": "string"}, "allowed_capabilities": {"type": "array", "items": {"type": "string"}}}}},
+                        {"name": "fleet_list_jobs", "description": "List durable job summaries in the caller's scope. Admin callers see all jobs.", "inputSchema": {"type": "object", "additionalProperties": false, "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "state": {"type": "string"}, "capability": {"type": "string"}, "worker_id": {"type": "string"}}}},
+                        {"name": "fleet_drain_worker", "description": "Drain or resume worker admission (admin required).", "inputSchema": {"type": "object", "additionalProperties": false, "required": ["worker_id"], "properties": {"worker_id": {"type": "string", "minLength": 1}, "accepting": {"type": "boolean", "default": false}}}},
+                        {"name": "fleet_revoke_token", "description": "Revoke a scoped caller token (admin required).", "inputSchema": {"type": "object", "additionalProperties": false, "required": ["token_id"], "properties": {"token_id": {"type": "string", "minLength": 1}}}}
+                    ]
+            }),
+        ),
         "tools/call" => {
-            let name = req["params"]["name"].as_str().unwrap_or("");
-            let args = req["params"]["arguments"].clone();
+            let Some(params) = params.and_then(Value::as_object) else {
+                return mcp_invalid_params(id);
+            };
+            let Some(name) = params
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            else {
+                return mcp_invalid_params(id);
+            };
+            let args = params.get("arguments");
+            if matches!(
+                name,
+                "fleet_list_jobs" | "fleet_drain_worker" | "fleet_revoke_token"
+            ) {
+                return mcp_fleet_tool(state, auth, id, name, args).await;
+            }
+            let args = args.cloned().unwrap_or(Value::Null);
             let result: Result<Value, String> = match name {
                 "fleet_discover" => discover_json(&state, &auth).map_err(|e| e.to_string()),
                 "fleet_list_workers" => {
@@ -1969,7 +2336,7 @@ async fn handle_mcp(
                 }
                 "fleet_get_job" => {
                     let jid = args["job_id"].as_str().unwrap_or("");
-                    get_job_inner(&state, &auth, jid).map_err(|(_, c)| c.to_string())
+                    get_job_inner(&state, &auth, jid, false).map_err(|(_, c)| c.to_string())
                 }
                 "fleet_issue_token" => {
                     if !auth.is_admin {
@@ -1990,29 +2357,103 @@ async fn handle_mcp(
                         Err(e) => Err(format!("invalid_args:{e}")),
                     }
                 }
-                _ => Err("unknown_tool".into()),
+                _ => return mcp_invalid_params(id),
             };
             match result {
-                Ok(v) => Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() }] }
-                }))
-                .into_response(),
-                Err(e) => Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32000, "message": e }
-                }))
-                .into_response(),
+                Ok(value) => mcp_content(id, value),
+                Err(error) => mcp_error(id, -32000, &error),
             }
         }
-        _ => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32601, "message": "method not found" }
-        }))
-        .into_response(),
+        _ => mcp_error(id, -32601, "method not found"),
+    }
+}
+
+fn mcp_result(id: &Value, result: Value) -> Response {
+    (
+        NO_STORE,
+        Json(json!({"jsonrpc": "2.0", "id": id, "result": result})),
+    )
+        .into_response()
+}
+
+fn mcp_content(id: &Value, value: Value) -> Response {
+    mcp_result(
+        id,
+        json!({"content": [{"type": "text", "text": value.to_string()}]}),
+    )
+}
+
+fn mcp_error(id: &Value, code: i32, message: &str) -> Response {
+    (
+        NO_STORE,
+        Json(json!({
+            "jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}
+        })),
+    )
+        .into_response()
+}
+
+fn mcp_invalid_params(id: &Value) -> Response {
+    mcp_error(id, -32602, "invalid params")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpDrainArgs {
+    worker_id: String,
+    #[serde(default)]
+    accepting: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpRevokeArgs {
+    token_id: String,
+}
+
+async fn mcp_fleet_tool(
+    state: FleetState,
+    auth: CallerAuth,
+    id: &Value,
+    name: &str,
+    args: Option<&Value>,
+) -> Response {
+    if name != "fleet_list_jobs" && !auth.is_admin {
+        return mcp_error(id, -32000, "admin_required");
+    }
+    let args = match args {
+        None => json!({}),
+        Some(args) if args.is_object() => args.clone(),
+        _ => return mcp_invalid_params(id),
+    };
+    let result = match name {
+        "fleet_list_jobs" => match serde_json::from_value::<JobListFilters>(args) {
+            Ok(filters) if filters.is_valid() => list_jobs(state, auth, filters).await,
+            _ => return mcp_invalid_params(id),
+        },
+        "fleet_drain_worker" => match serde_json::from_value::<McpDrainArgs>(args) {
+            Ok(args) if !args.worker_id.trim().is_empty() => {
+                set_worker_accepting_inner(&state, &args.worker_id, args.accepting)
+            }
+            _ => return mcp_invalid_params(id),
+        },
+        "fleet_revoke_token" => match serde_json::from_value::<McpRevokeArgs>(args) {
+            Ok(args) if !args.token_id.trim().is_empty() => {
+                revoke_token_inner(&state, &args.token_id)
+            }
+            _ => return mcp_invalid_params(id),
+        },
+        _ => return mcp_invalid_params(id),
+    };
+    match result {
+        Ok(value) => mcp_content(id, value),
+        Err((StatusCode::NOT_FOUND | StatusCode::CONFLICT, code)) => mcp_result(
+            id,
+            json!({
+                "isError": true, "content": [{"type": "text", "text": code}]
+            }),
+        ),
+        Err((_, code)) => mcp_error(id, -32000, code),
     }
 }
 
@@ -2755,6 +3196,865 @@ mod tests {
         serde_json::from_str(text).unwrap_or(Value::Null)
     }
 
+    async fn call_mcp(
+        state: State<FleetState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Response {
+        let mut request = Request::new(Body::from(body.to_string()));
+        *request.headers_mut() = headers;
+        request
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        handle_mcp(state, request).await
+    }
+
+    fn mounted_fleet(root: &Path, enabled: bool) -> Router {
+        let spine = super::super::Spine {
+            root: root.into(),
+            edge: false,
+            worker_ports: [0, 0],
+            admin: false,
+            sequence: Arc::new(Mutex::new(0)),
+        };
+        let namespace = if enabled {
+            router(&root.join("controller.json"), root).unwrap()
+        } else {
+            closed_router()
+        };
+        super::super::api_with_namespaces(spine, Router::new(), namespace)
+    }
+
+    async fn fleet_request(
+        app: &Router,
+        method: &str,
+        path: &str,
+        bearer: &str,
+        media_type: Option<&str>,
+        body: impl Into<Body>,
+    ) -> Response {
+        use tower::ServiceExt;
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/v1/fleet{path}"));
+        if !bearer.is_empty() {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        }
+        if let Some(media_type) = media_type {
+            request = request.header(header::CONTENT_TYPE, media_type);
+        }
+        app.clone()
+            .oneshot(request.body(body.into()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn fleet_json(
+        app: &Router,
+        method: &str,
+        path: &str,
+        bearer: &str,
+        body: Value,
+    ) -> Response {
+        fleet_request(
+            app,
+            method,
+            path,
+            bearer,
+            Some("application/json"),
+            body.to_string(),
+        )
+        .await
+    }
+
+    async fn rpc(app: &Router, token: &str, body: Value) -> Value {
+        let response = fleet_json(app, "POST", "/mcp", token, body).await;
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        read_json(response).await
+    }
+
+    async fn tool(app: &Router, token: &str, name: &str, arguments: Value) -> Value {
+        rpc(
+            app,
+            token,
+            json!({
+                "jsonrpc":"2.0", "id":"call", "method":"tools/call",
+                "params":{"name":name, "arguments":arguments}
+            }),
+        )
+        .await
+    }
+
+    fn seed_token(
+        state: &FleetState,
+        name: &str,
+        actor: &str,
+        project: &str,
+        expired: bool,
+        revoked: bool,
+    ) {
+        let expires = if expired { 1 } else { now_ms() as i64 + 60_000 };
+        state.db.lock().unwrap().execute(
+            "INSERT INTO fleet_tokens (token_id, token_sha256, actor, project, allowed_capabilities_json,
+                 max_vram_bytes, created_at_ms, expires_at_ms, revoked)
+             VALUES (?1,?2,?3,?4,'[\"permitted\"]',0,0,?5,?6)",
+            params![name, sha256_hex(name.as_bytes()), actor, project, expires, revoked],
+        ).unwrap();
+    }
+
+    fn seed_job(
+        state: &FleetState,
+        id: &str,
+        owner: (&str, &str),
+        offer: (&str, &str),
+        status: &str,
+        at: i64,
+    ) {
+        state.db.lock().unwrap().execute(
+            "INSERT INTO fleet_jobs (job_id,idempotency_key,actor,project,capability,worker_id,state,
+                input_json,output_json,capacity_released,created_at_ms,updated_at_ms)
+             VALUES (?1,?1,?2,?3,?4,?5,?6,'{\"fixture_input\":true}','null',2,?7,?7+1)",
+            params![id, owner.0, owner.1, offer.0, offer.1, status, at],
+        ).unwrap();
+    }
+
+    fn fixture_enrollment(session: &str) -> Value {
+        json!({
+            "worker_id":"worker", "host":"fixture-host", "rpc_url":"http://127.0.0.1:9",
+            "rpc_secret_hex":SECRET,"rpc_session":session,
+            "cpu_millicores":4000,"ram_bytes":2000000000,"vram_bytes":0,
+            "capabilities":[{"capability":"fixture","kind":"exec"}]
+        })
+    }
+
+    async fn enroll_fixture(app: &Router, session: &str) -> Value {
+        read_json(
+            fleet_json(
+                app,
+                "POST",
+                "/workers/enroll",
+                "fixture",
+                fixture_enrollment(session),
+            )
+            .await,
+        )
+        .await
+    }
+
+    fn worker_admission(state: &FleetState) -> (String, bool, i64) {
+        state.db.lock().unwrap().query_row(
+            "SELECT status, operator_drained, last_heartbeat_ms FROM fleet_workers WHERE worker_id='worker'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap()
+    }
+
+    #[test]
+    fn jobs_list_requires_auth_and_scopes_actor_and_project() {
+        let (root, state, _) = open_state("jobs-scope");
+        seed_token(&state, "scoped", "actor-a", "project-one", false, false);
+        seed_token(&state, "default-scope", "admin", "default", false, false);
+        seed_token(&state, "expired", "actor-a", "project-one", true, false);
+        seed_token(&state, "revoked", "actor-a", "project-one", false, true);
+        for (id, owner, at) in [
+            ("own", ("actor-a", "project-one"), 1),
+            ("other-project", ("actor-a", "project-two"), 2),
+            ("other-actor", ("actor-b", "project-one"), 3),
+            ("default-owner", ("admin", "default"), 4),
+        ] {
+            seed_job(
+                &state,
+                id,
+                owner,
+                ("outside-allowlist", "worker"),
+                "succeeded",
+                at,
+            );
+        }
+        let app = mounted_fleet(&root, true);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let admin =
+                read_json(fleet_request(&app, "GET", "/jobs", "fixture", None, "").await).await;
+            assert_eq!(admin["jobs"].as_array().unwrap().len(), 4);
+            for (token, id) in [("scoped", "own"), ("default-scope", "default-owner")] {
+                let scoped = read_json(
+                    fleet_request(
+                        &app,
+                        "GET",
+                        "/jobs?limit=1&state=succeeded",
+                        token,
+                        None,
+                        "",
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(scoped["jobs"].as_array().unwrap().len(), 1);
+                assert_eq!(scoped["jobs"][0]["job_id"], id);
+                assert_eq!(scoped["jobs"][0]["capability"], "outside-allowlist");
+            }
+            for (token, code) in [
+                ("", "auth_required"),
+                ("bad", "auth_invalid"),
+                ("expired", "auth_expired_or_revoked"),
+                ("revoked", "auth_expired_or_revoked"),
+            ] {
+                let (status, body) = response_json(
+                    fleet_request(
+                        &app,
+                        "GET",
+                        "/jobs?limit=bad&actor=override",
+                        token,
+                        None,
+                        "",
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+                assert_eq!(body["error"]["code"], code);
+            }
+            let legacy =
+                read_json(fleet_request(&app, "GET", "/jobs/own", "scoped", None, "").await).await;
+            assert!(legacy.get("input").is_none());
+            let detail = read_json(
+                fleet_request(
+                    &app,
+                    "GET",
+                    "/jobs/own?include_input=true",
+                    "scoped",
+                    None,
+                    "",
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(detail["input"], json!({"fixture_input":true}));
+            assert_eq!(detail["output"], Value::Null);
+            for id in ["other-actor", "other-project"] {
+                let response = fleet_request(
+                    &app,
+                    "GET",
+                    &format!("/jobs/{id}?include_input=true"),
+                    "scoped",
+                    None,
+                    "",
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+        });
+        drop(app);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn jobs_list_filters_orders_and_bounds_durable_summaries() {
+        let (root, state, _) = open_state("jobs-filter");
+        for n in 0..205 {
+            seed_job(
+                &state,
+                &format!("job-{n:03}"),
+                ("actor", "project"),
+                ("echo", "worker-a"),
+                "succeeded",
+                n / 2 + 10,
+            );
+        }
+        const LITERAL: &str = " x' OR 1=1 -- ";
+        seed_job(
+            &state,
+            "literal",
+            ("actor", "project"),
+            (LITERAL, "worker-b"),
+            "failed_uncertain",
+            1,
+        );
+        state.db.lock().unwrap().execute(
+            "UPDATE fleet_jobs SET error_code='uncertain', gpu_uuid='fixture-gpu', output_sha256=?1, capacity_released=0
+             WHERE job_id='job-204'",
+            [sha256_hex(b"fixture output")],
+        ).unwrap();
+        drop(state);
+        let app = mounted_fleet(&root, true);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for (query, limit) in [("", 50), ("?limit=1", 1), ("?limit=200", 200)] {
+                let response = fleet_request(&app, "GET", &format!("/jobs{query}"), "fixture", None, "").await;
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                let body = read_json(response).await;
+                assert_eq!(body["schema_version"], "diffuser-fleet/v1");
+                let jobs = body["jobs"].as_array().unwrap();
+                assert_eq!(jobs.len(), limit);
+                for (index, job) in jobs.iter().enumerate() {
+                    assert_eq!(job["job_id"], format!("job-{:03}", 204 - index));
+                }
+                let newest = &jobs[0];
+                assert_eq!(newest["capacity_released"], false);
+                assert_eq!(newest["gpu_uuid"], "fixture-gpu");
+                assert_eq!(newest["output_sha256"], sha256_hex(b"fixture output"));
+                assert_eq!(newest["error_code"], "uncertain");
+            }
+            for query in ["limit=0","limit=201","limit=-1","limit=bad","limit=1.0","limit=",
+                "limit=3&limit=3","state=running&state=failed","state=","capability=+","worker_id=%09",
+                "capability=echo&capability=echo","worker_id=a&worker_id=b","unknown=x","actor=actor","project=project"] {
+                let (status, body) = response_json(fleet_request(&app, "GET", &format!("/jobs?{query}"), "fixture", None, "").await).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+                assert_eq!(body["error"]["code"], "invalid_request");
+            }
+            let mut encoded = reqwest::Url::parse("http://fixture.invalid").unwrap();
+            encoded.query_pairs_mut().append_pair("capability", LITERAL);
+            let cap = encoded.query().unwrap();
+            for filters in [
+                "state=failed_uncertain".to_string(), "worker_id=worker-b".to_string(), cap.to_string(),
+                format!("state=failed_uncertain&worker_id=worker-b&{cap}"),
+            ] {
+                let body = read_json(fleet_request(&app, "GET", &format!("/jobs?limit=1&{filters}"), "fixture", None, "").await).await;
+                assert_eq!(body["jobs"], json!([{
+                    "job_id":"literal", "idempotency_key":"literal", "actor":"actor", "project":"project",
+                    "capability":LITERAL, "worker_id":"worker-b", "gpu_uuid":null, "state":"failed_uncertain",
+                    "output_sha256":null, "error_code":null, "capacity_released":true,
+                    "created_at_ms":1, "updated_at_ms":2
+                }]));
+            }
+            for query in ["state=unfamiliar", "state=succeeded&worker_id=worker-b"] {
+                let body = read_json(fleet_request(&app, "GET", &format!("/jobs?{query}"), "fixture", None, "").await).await;
+                assert_eq!(body["jobs"], json!([]));
+            }
+        });
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_drain_resume_preserves_legacy_and_requires_admin() {
+        const DRAIN: &str = "/workers/worker/drain";
+        let (root, state, _) = open_state("drain-rest");
+        seed_token(&state, "scoped", "a", "p", false, false);
+        let app = mounted_fleet(&root, true);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            enroll_fixture(&app, SESSION).await;
+            let first = worker_admission(&state);
+            let body =
+                read_json(fleet_request(&app, "POST", DRAIN, "fixture", None, "").await).await;
+            assert_eq!(
+                body,
+                json!({"ok":true,"worker_id":"worker","status":"draining"})
+            );
+            for (json_body, expected) in [
+                ("{}", "draining"),
+                ("{\"accepting\":false}", "draining"),
+                ("{\"accepting\":true}", "active"),
+                ("{\"accepting\":true}", "active"),
+            ] {
+                let response = fleet_request(
+                    &app,
+                    "POST",
+                    DRAIN,
+                    "fixture",
+                    Some("application/json"),
+                    json_body,
+                )
+                .await;
+                assert_eq!(read_json(response).await["status"], expected);
+            }
+            for token in ["", "bad", "scoped"] {
+                let (status, body) =
+                    response_json(fleet_request(&app, "POST", DRAIN, token, None, "invalid").await)
+                        .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+                assert_eq!(body["error"]["code"], "auth_required");
+                assert_eq!(worker_admission(&state), first);
+            }
+            for raw in [
+                "null",
+                "[]",
+                "[true]",
+                "{",
+                "{} {}",
+                "{\"accepting\":null}",
+                "{\"accepting\":1}",
+                "{\"drain\":false}",
+                "{\"accepting\":true,\"accepting\":false}",
+            ] {
+                let response = fleet_request(
+                    &app,
+                    "POST",
+                    DRAIN,
+                    "fixture",
+                    Some("application/json"),
+                    raw,
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{raw}");
+            }
+            assert_eq!(
+                fleet_request(&app, "POST", DRAIN, "fixture", Some("text/plain"), "{}")
+                    .await
+                    .status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE
+            );
+            let size_limit = " ".repeat(MAX_DRAIN_BODY_BYTES - 2) + "{}";
+            assert_eq!(
+                fleet_request(
+                    &app,
+                    "POST",
+                    DRAIN,
+                    "fixture",
+                    Some("application/json"),
+                    size_limit.clone()
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                fleet_request(
+                    &app,
+                    "POST",
+                    DRAIN,
+                    "fixture",
+                    Some("application/json"),
+                    size_limit + " "
+                )
+                .await
+                .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            let (status, body) = response_json(
+                fleet_request(&app, "POST", "/workers/missing/drain", "fixture", None, "").await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"]["code"], "worker_not_found");
+            assert_eq!(worker_admission(&state), ("draining".into(), true, first.2));
+            state
+                .db
+                .lock()
+                .unwrap()
+                .execute("UPDATE fleet_workers SET last_heartbeat_ms=0", [])
+                .unwrap();
+            let resume =
+                fleet_json(&app, "POST", DRAIN, "fixture", json!({"accepting":true})).await;
+            assert_eq!(read_json(resume).await["status"], "active");
+            let workers =
+                read_json(fleet_request(&app, "GET", "/workers", "fixture", None, "").await).await;
+            assert_eq!(workers["workers"][0]["accepting"], false);
+            assert_eq!(worker_admission(&state), ("active".into(), false, 0));
+        });
+        drop(app);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_drain_persists_across_enrollment_and_preserves_quarantine() {
+        const NEXT_SESSION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const FINAL_SESSION: &str = "cccccccccccccccccccccccccccccccc";
+        const DRAIN: &str = "/workers/worker/drain";
+        let (root, state, headers) = open_state("drain-persist");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let app = mounted_fleet(&root, true);
+        runtime.block_on(enroll_fixture(&app, SESSION));
+        drop(app);
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "ALTER TABLE fleet_workers DROP COLUMN operator_drained;
+             UPDATE fleet_workers SET status='draining';",
+            )
+            .unwrap();
+        let app = mounted_fleet(&root, true);
+        assert!(worker_admission(&state).1);
+        drop(app);
+        // A second startup must leave an existing flag alone.
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE fleet_workers SET operator_drained=0", [])
+            .unwrap();
+        let app = mounted_fleet(&root, true);
+        assert!(!worker_admission(&state).1);
+        let auth = state.authenticate(&headers).unwrap();
+        let req: SubmitJobRequest =
+            serde_json::from_value(json!({"capability":"fixture"})).unwrap();
+        runtime.block_on(async {
+            assert_eq!(
+                fleet_request(&app, "POST", DRAIN, "fixture", None, "")
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let heartbeat = fleet_json(
+                &app,
+                "POST",
+                "/workers/worker/heartbeat",
+                "fixture",
+                json!({}),
+            )
+            .await;
+            assert_eq!(heartbeat.status(), StatusCode::OK);
+            assert_eq!(worker_admission(&state).0, "draining");
+            assert_eq!(enroll_fixture(&app, SESSION).await["status"], "draining");
+            assert_eq!(
+                enroll_fixture(&app, NEXT_SESSION).await["status"],
+                "draining"
+            );
+            assert_eq!(
+                fleet_json(&app, "POST", DRAIN, "fixture", json!({"accepting":true}))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let PrepareOutcome::Fresh(job) = prepare_job(&state, &auth, "first", &req).unwrap()
+            else {
+                panic!("expected fresh reservation");
+            };
+            let reserved = worker_reserved(&state);
+            assert!(reserved.0 > 0 && reserved.1 > 0);
+            let before = worker_admission(&state);
+            assert_eq!(
+                fleet_request(&app, "POST", DRAIN, "fixture", None, "")
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            assert_eq!(worker_admission(&state).2, before.2);
+            assert!(matches!(
+                prepare_job(&state, &auth, "blocked", &req),
+                Err((_, "capability_unavailable", _))
+            ));
+            assert_eq!(
+                get_job_inner(&state, &auth, &job.job_id, false).unwrap()["state"],
+                "running"
+            );
+            assert_eq!(
+                enroll_fixture(&app, NEXT_SESSION).await["status"],
+                "draining"
+            );
+            assert_eq!(worker_reserved(&state), reserved);
+            let success = WorkerOutcome {
+                state: "succeeded",
+                output: Value::Null,
+                output_sha256: None,
+                error_code: None,
+                cleanup_ok: true,
+            };
+            finish_job(&state, &job, &success, false).unwrap();
+            assert_eq!(worker_reserved(&state), (0, 0, 0));
+            assert_eq!(
+                get_job_inner(&state, &auth, &job.job_id, false).unwrap()["state"],
+                "succeeded"
+            );
+            assert_eq!(worker_admission(&state).0, "draining");
+
+            assert_eq!(
+                fleet_json(&app, "POST", DRAIN, "fixture", json!({"accepting":true}))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let PrepareOutcome::Fresh(job) =
+                prepare_job(&state, &auth, "cleanup-failure", &req).unwrap()
+            else {
+                panic!("expected fresh reservation");
+            };
+            let reserved = worker_reserved(&state);
+            let failure = WorkerOutcome {
+                state: "failed_uncertain",
+                output: Value::Null,
+                output_sha256: None,
+                error_code: Some("fixture_cleanup_failure".into()),
+                cleanup_ok: false,
+            };
+            finish_job(&state, &job, &failure, false).unwrap();
+            assert_eq!(worker_admission(&state).0, "quarantined");
+            assert!(!worker_admission(&state).1);
+            assert_eq!(
+                enroll_fixture(&app, NEXT_SESSION).await["status"],
+                "quarantined"
+            );
+            assert_eq!(worker_reserved(&state), reserved);
+            let (status, body) = response_json(
+                fleet_json(&app, "POST", DRAIN, "fixture", json!({"accepting":true})).await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["error"]["code"], "worker_quarantined");
+            assert!(!worker_admission(&state).1);
+            let drained =
+                read_json(fleet_request(&app, "POST", DRAIN, "fixture", None, "").await).await;
+            assert_eq!(drained["status"], "quarantined");
+            assert!(worker_admission(&state).1);
+            assert_eq!(
+                enroll_fixture(&app, FINAL_SESSION).await["status"],
+                "draining"
+            );
+            assert_eq!(worker_reserved(&state), (0, 0, 0));
+            assert!(worker_admission(&state).1);
+            assert_eq!(
+                fleet_json(&app, "POST", DRAIN, "fixture", json!({"accepting":true}))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let PrepareOutcome::Fresh(job) =
+                prepare_job(&state, &auth, "drained-cleanup-failure", &req).unwrap()
+            else {
+                panic!("expected fresh reservation");
+            };
+            assert_eq!(
+                fleet_request(&app, "POST", DRAIN, "fixture", None, "")
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            finish_job(&state, &job, &failure, false).unwrap();
+            let (status, drained, _) = worker_admission(&state);
+            assert_eq!(status, "quarantined");
+            assert!(drained);
+            assert_eq!(enroll_fixture(&app, SESSION).await["status"], "draining");
+            assert_eq!(worker_reserved(&state), (0, 0, 0));
+        });
+        drop(app);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_ping_initialized_and_rpc_errors() {
+        let (root, state, _) = open_state("mcp-rpc");
+        let app = mounted_fleet(&root, true);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let initialize = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":"init","method":"initialize"})).await;
+            assert_eq!(initialize, json!({"jsonrpc":"2.0","id":"init","result":{
+                "protocolVersion":"2024-11-05","serverInfo":{"name":"diffuser-fleet","version":"1.0.0"},
+                "capabilities":{"tools":{}}
+            }}));
+            let initialized = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":4,"method":"notifications/initialized","params":{}})).await;
+            assert_eq!(initialized, json!({"jsonrpc":"2.0","id":4,"result":null}));
+            let ping = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":-8,"method":"ping"})).await;
+            assert_eq!(ping, json!({"jsonrpc":"2.0","id":-8,"result":{}}));
+            enroll_fixture(&app, SESSION).await;
+            for notification in [
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                json!({"jsonrpc":"2.0","method":"notifications/initialized","params":true}),
+                json!({"jsonrpc":"2.0","method":"unknown","params":null}),
+                json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"fleet_drain_worker","arguments":{"worker_id":"worker"}}}),
+            ] {
+                let response = fleet_json(&app, "POST", "/mcp", "fixture", notification).await;
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().is_empty());
+            }
+            assert_eq!(worker_admission(&state).0, "active");
+            for raw in ["{", "[] []", "\"unterminated"] {
+                let response = fleet_request(&app, "POST", "/mcp", "fixture", Some("application/json"), raw).await;
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                let body = read_json(response).await;
+                assert_eq!(body["error"]["code"], -32700);
+                assert_eq!(body["id"], Value::Null);
+            }
+            for invalid in [
+                json!([]), json!(null), json!({"method":"ping","id":1}),
+                json!({"jsonrpc":"1.0","method":"ping","id":1}),
+                json!({"jsonrpc":"2.0","method":"","id":1}),
+                json!({"jsonrpc":"2.0","method":"ping","id":null}),
+                json!({"jsonrpc":"2.0","method":"ping","id":1.5}),
+                json!({"jsonrpc":"2.0","method":"ping","id":true}),
+            ] {
+                let body = rpc(&app, "fixture", invalid).await;
+                assert_eq!(body["id"], Value::Null);
+                assert_eq!(body["error"]["code"], -32600);
+            }
+            let unknown = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":"unknown","method":"unknown"})).await;
+            assert_eq!(unknown["error"]["code"], -32601);
+            assert_eq!(unknown["id"], "unknown");
+            for (method, params) in [
+                ("ping", json!({"extra":true})), ("initialize", json!(null)),
+                ("notifications/initialized", json!([])), ("tools/list", json!(true)), ("tools/call", json!([])),
+                ("tools/call", json!({})), ("tools/call", json!({"name":"  "})),
+                ("tools/call", json!({"name":"not_a_tool","arguments":false})),
+            ] {
+                let body = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":2,"method":method,"params":params})).await;
+                assert_eq!(body["error"]["code"], -32602);
+                assert_eq!(body["id"], 2);
+            }
+            for method in ["initialize", "notifications/initialized", "ping"] {
+                let response = fleet_json(&app, "POST", "/mcp", "", json!({"jsonrpc":"2.0","method":method})).await;
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            assert_eq!(fleet_request(&app, "POST", "/mcp", "fixture", Some("text/plain"), "{}").await.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_eq!(fleet_request(&app, "POST", "/mcp", "fixture", Some("application/json"), " ".repeat(1024 * 1024 + 1)).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        });
+        drop(app);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_fleet_tools_share_rest_scope_and_admin_mutations() {
+        let (root, state, _) = open_state("mcp-tools");
+        seed_token(&state, "scoped", "owner", "project", false, false);
+        seed_job(
+            &state,
+            "owned",
+            ("owner", "project"),
+            ("elsewhere", "other"),
+            "succeeded",
+            1,
+        );
+        seed_job(
+            &state,
+            "foreign",
+            ("owner", "other-project"),
+            ("elsewhere", "other"),
+            "succeeded",
+            2,
+        );
+        let app = mounted_fleet(&root, true);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            enroll_fixture(&app, SESSION).await;
+            let admin = "fixture";
+            let scoped = "scoped";
+            let list = json!({"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}});
+            let catalog = rpc(&app, scoped, list.clone()).await;
+            assert_eq!(catalog, rpc(&app, admin, list).await);
+            let tools = catalog["result"]["tools"].as_array().unwrap();
+            let names = tools.iter().map(|entry| entry["name"].as_str().unwrap()).collect::<Vec<_>>();
+            assert_eq!(names, ["fleet_discover", "fleet_list_workers", "fleet_submit_job", "fleet_get_job", "fleet_issue_token",
+                "fleet_list_jobs", "fleet_drain_worker", "fleet_revoke_token"]);
+            assert_eq!(tools[2]["inputSchema"]["required"], json!(["capability", "idempotency_key"]));
+            assert_eq!(tools[2]["inputSchema"]["properties"]["timeout_secs"]["maximum"], 21600);
+            assert_eq!(tools[3]["inputSchema"]["required"], json!(["job_id"]));
+            assert_eq!(tools[4]["inputSchema"]["required"], json!(["actor", "project", "allowed_capabilities"]));
+            for entry in &tools[5..] {
+                assert_eq!(entry["inputSchema"]["type"], "object");
+                assert_eq!(entry["inputSchema"]["additionalProperties"], false);
+            }
+            assert_eq!(tools[5]["inputSchema"]["properties"]["limit"], json!({"type":"integer","minimum":1,"maximum":200,"default":50}));
+            assert_eq!(tools[6]["inputSchema"]["properties"]["accepting"], json!({"type":"boolean","default":false}));
+            assert_eq!(tools[6]["inputSchema"]["required"], json!(["worker_id"]));
+            assert_eq!(tools[7]["inputSchema"]["required"], json!(["token_id"]));
+            for token in [admin, scoped] {
+                let rest = read_json(fleet_request(&app, "GET", "/jobs?state=succeeded", token, None, "").await).await;
+                let mcp = tool(&app, token, "fleet_list_jobs", json!({"state":"succeeded"})).await;
+                assert_eq!(mcp["result"]["content"][0]["type"], "text");
+                assert_eq!(mcp_tool(&mcp), rest);
+                let omitted = rpc(&app, token, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fleet_list_jobs"}})).await;
+                assert_eq!(mcp_tool(&omitted), rest);
+            }
+
+            for (name, invalid) in [
+                ("fleet_list_jobs", json!(null)), ("fleet_list_jobs", json!([])), ("fleet_list_jobs", json!({"actor":"owner"})),
+                ("fleet_list_jobs", json!({"limit":null})), ("fleet_list_jobs", json!({"limit":"1"})),
+                ("fleet_list_jobs", json!({"limit":201})), ("fleet_list_jobs", json!({"limit":1.0})),
+                ("fleet_list_jobs", json!({"state":null})), ("fleet_list_jobs", json!({"worker_id":1})),
+                ("fleet_list_jobs", json!({"capability":"  "})), ("fleet_drain_worker", json!({"worker_id":" "})),
+                ("fleet_drain_worker", json!({"worker_id":"worker","accepting":null})),
+                ("fleet_drain_worker", json!({"worker_id":"worker","accepting":"true"})),
+                ("fleet_drain_worker", json!({"worker_id":"worker","drain":false})),
+                ("fleet_revoke_token", json!({"token_id":null})), ("fleet_revoke_token", json!({})),
+            ] {
+                assert_eq!(tool(&app, admin, name, invalid).await["error"]["code"], -32602, "{name}");
+            }
+            for (name, args) in [("fleet_drain_worker", json!({"worker_id":"worker"})),
+                ("fleet_revoke_token", json!({"token_id":scoped})), ("fleet_drain_worker", json!(null)),
+                ("fleet_revoke_token", json!({"token_id":"unknown"}))] {
+                let denied = tool(&app, scoped, name, args).await;
+                assert_eq!(denied["error"], json!({"code":-32000,"message":"admin_required"}));
+            }
+            assert_eq!(worker_admission(&state).0, "active");
+            assert_eq!(fleet_request(&app, "GET", "/jobs", scoped, None, "").await.status(), StatusCode::OK);
+            for (args, expected) in [(json!({"worker_id":"worker"}), "draining"), (json!({"worker_id":"worker","accepting":true}), "active")] {
+                assert_eq!(mcp_tool(&tool(&app, admin, "fleet_drain_worker", args).await),
+                    json!({"ok":true,"worker_id":"worker","status":expected}));
+                assert_eq!(worker_admission(&state).0, expected);
+            }
+            state.db.lock().unwrap().execute("UPDATE fleet_workers SET status='quarantined'", []).unwrap();
+            for (name, args, code) in [
+                ("fleet_drain_worker", json!({"worker_id":"worker","accepting":true}), "worker_quarantined"),
+                ("fleet_drain_worker", json!({"worker_id":"missing"}), "worker_not_found"),
+                ("fleet_revoke_token", json!({"token_id":"missing"}), "token_not_found"),
+            ] {
+                let result = tool(&app, admin, name, args).await;
+                assert_eq!(result["result"], json!({"isError":true,"content":[{"type":"text","text":code}]}));
+            }
+            assert_eq!(worker_admission(&state).0, "quarantined");
+            for _ in 0..2 {
+                let revoked = tool(&app, admin, "fleet_revoke_token", json!({"token_id":scoped})).await;
+                assert_eq!(mcp_tool(&revoked), json!({"ok":true,"token_id":scoped,"revoked":true}));
+                let (status, body) = response_json(fleet_request(&app, "GET", "/jobs", scoped, None, "").await).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+                assert_eq!(body["error"]["code"], "auth_expired_or_revoked");
+            }
+            assert_eq!(read_json(fleet_request(&app, "POST", "/tokens/scoped/revoke", admin, None, "").await).await,
+                json!({"ok":true,"token_id":scoped,"revoked":true}));
+            let discovered = mcp_tool(&tool(&app, admin, "fleet_discover", json!({})).await);
+            assert_eq!(discovered["schema_version"], "diffuser-fleet/v1");
+            assert_eq!(discovered["capabilities"], json!([]));
+            let workers = mcp_tool(&tool(&app, admin, "fleet_list_workers", json!({})).await);
+            assert_eq!(workers["workers"][0]["worker_id"], "worker");
+            let issued = mcp_tool(&tool(&app, admin, "fleet_issue_token",
+                json!({"actor":"issued","project":"p","allowed_capabilities":["fixture"]})).await);
+            assert_eq!(issued["actor"], "issued");
+            let issued_bearer = issued["token"].as_str().unwrap();
+            for name in ["fleet_list_workers", "fleet_issue_token"] {
+                let denied = tool(&app, issued_bearer, name, json!({})).await;
+                assert_eq!(denied["error"], json!({"code":-32000,"message":"admin_required"}));
+            }
+            let invalid = tool(&app, admin, "fleet_issue_token", json!({})).await;
+            assert_eq!(invalid["error"]["code"], -32000);
+            state.db.lock().unwrap().execute("DROP TABLE fleet_jobs", []).unwrap();
+            let error = tool(&app, admin, "fleet_list_jobs", json!({})).await;
+            assert_eq!(error["error"], json!({"code":-32000,"message":"storage_unavailable"}));
+            let (status, body) = response_json(fleet_request(&app, "GET", "/jobs", admin, None, "").await).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["error"]["code"], "storage_unavailable");
+        });
+        drop(app);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fleet_ui_headers_redirect_and_closed_routes() {
+        let (root, state, _) = open_state("ui");
+        let enabled = mounted_fleet(&root, true);
+        let closed = mounted_fleet(&root, false);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for bearer in ["", "ignored-fixture"] {
+                let response = fleet_request(&enabled, "GET", "/ui", bearer, None, "").await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+                assert_eq!(response.headers()[header::CONTENT_SECURITY_POLICY],
+                    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+                assert_eq!(response.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+                assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert_eq!(axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap(),
+                    include_str!("fleet_ui.html").as_bytes());
+            }
+            let redirect = fleet_request(&enabled, "GET", "/ui/?discard=yes", "", None, "").await;
+            assert_eq!(redirect.status(), StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(redirect.headers()[header::LOCATION], "/v1/fleet/ui");
+            assert_eq!(redirect.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(axum::body::to_bytes(redirect.into_body(), 1024).await.unwrap().is_empty());
+            for (method, path) in [("GET","/jobs"), ("GET","/ui"), ("GET","/ui/?discard=yes"), ("POST","/jobs")] {
+                let (status, body) = response_json(fleet_request(&closed, method, path, "", None, "").await).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(body["error"]["code"], "fleet_closed");
+            }
+        });
+        drop(enabled);
+        drop(closed);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[derive(Clone)]
     struct HoldState {
         hits: Arc<AtomicUsize>,
@@ -2843,7 +4143,7 @@ mod tests {
         });
 
         let auth = state.authenticate(&headers).unwrap();
-        let running = get_job_inner(&state, &auth, &job_id).unwrap();
+        let running = get_job_inner(&state, &auth, &job_id, false).unwrap();
         assert_eq!(running["state"], "running");
         assert_eq!(running["capacity_released"], false);
         assert_eq!(running["worker_id"], "worker");
@@ -2867,7 +4167,7 @@ mod tests {
         runtime.block_on(async {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                let job = get_job_inner(&state, &auth, &job_id).unwrap();
+                let job = get_job_inner(&state, &auth, &job_id, false).unwrap();
                 if job["state"] != "running" {
                     assert_eq!(job["state"], "succeeded");
                     assert_eq!(job["output"], json!({"echo": "async"}));
@@ -2888,6 +4188,9 @@ mod tests {
                 State(state.clone()),
                 headers.clone(),
                 AxPath(job_id.clone()),
+                Ok(Query(JobDetailQuery {
+                    include_input: false,
+                })),
             )
             .await;
             read_json(response).await
@@ -2897,7 +4200,7 @@ mod tests {
         assert_eq!(listed["job_id"], job_id);
 
         let mcp_get = runtime.block_on(async {
-            let response = handle_mcp(
+            let response = call_mcp(
                 State(state.clone()),
                 headers.clone(),
                 Json(json!({
@@ -2940,7 +4243,10 @@ mod tests {
                 .block_on(handle_get_job(
                     State(state.clone()),
                     foreign,
-                    AxPath(job_id.clone())
+                    AxPath(job_id.clone()),
+                    Ok(Query(JobDetailQuery {
+                        include_input: false
+                    })),
                 ))
                 .status(),
             StatusCode::FORBIDDEN
@@ -2961,7 +4267,7 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         let mcp_submit = runtime.block_on(async {
-            let response = handle_mcp(
+            let response = call_mcp(
                 State(state.clone()),
                 headers.clone(),
                 Json(json!({
@@ -2991,7 +4297,7 @@ mod tests {
         runtime.block_on(async {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                let job = get_job_inner(&state, &auth, &mcp_job).unwrap();
+                let job = get_job_inner(&state, &auth, &mcp_job, false).unwrap();
                 if job["state"] != "running" {
                     assert_eq!(job["state"], "succeeded");
                     assert_eq!(job["capacity_released"], true);
@@ -3002,7 +4308,7 @@ mod tests {
             }
         });
         let mcp_replay = runtime.block_on(async {
-            let response = handle_mcp(
+            let response = call_mcp(
                 State(state.clone()),
                 headers,
                 Json(json!({
@@ -3515,7 +4821,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "CREATE TABLE fleet_workers(worker_id TEXT PRIMARY KEY, host TEXT NOT NULL);
+                "CREATE TABLE fleet_workers(worker_id TEXT PRIMARY KEY, host TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
                  INSERT INTO fleet_workers(worker_id, host) VALUES ('old', 'homelab');",
             )
             .unwrap();

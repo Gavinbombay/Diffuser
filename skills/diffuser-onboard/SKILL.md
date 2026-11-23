@@ -1,25 +1,75 @@
 ---
 name: diffuser-onboard
-description: Guide an AI agent to onboard any new host, CPU/GPU accelerator, or pluggable tool/service (exec or http) into a live Diffuser fleet controller in one flow.
+description: Enroll a CPU, GPU or service as a Diffuser worker, connect its adapter over a private path, and prove routing, telemetry and drain/resume with a durable smoke receipt.
 ---
 
-# Diffuser Worker & Capability Onboarding Skill
+# Onboard a Diffuser worker
 
-Use this skill when adding a new machine, GPU, or tool (Blender, Whisper, Ollama, ComfyUI, native CUDA helper, etc.) to Diffuser.
+## Inspect the target and choose a profile
 
-## Steps
+Record a unique worker ID, an operator-chosen host label, usable CPU in millicores (1000 per core) and usable RAM in bytes. Reserve headroom for the host. On Linux, `nproc` and `free -b` give a starting point. On a host with NVIDIA devices, inspect inventory and live telemetry under the worker service account.
 
-1. **Inspect Target Hardware**
-   - Run `nvidia-smi --query-gpu=uuid,name,memory.total --format=csv,noheader,nounits` (if NVIDIA GPU present) and note CPU/RAM.
-2. **Author `fleet-worker.json` (mode `0600`)**
-   - Set unique `worker_id`, `host`, loopback `bind` (e.g. `127.0.0.1:5835`), `advertise_url`, `controller_url` (`http://127.0.0.1:5820`), `enroll_bearer`, and a fresh 64-hex `rpc_secret_hex`.
-   - Declare one or more `profiles` using either:
-     - `adapter.kind = "exec"`: `command`, `timeout_secs`, optional `gpu_uuid` (automatically injects `CUDA_VISIBLE_DEVICES`, `DIFFUSER_JOB_ID`, `DIFFUSER_CAPABILITY`, reads JSON on stdin, returns JSON on stdout).
-     - `adapter.kind = "http"`: `url`, `method`, `timeout_secs` (forwards JSON payload to a local HTTP service like Ollama/ComfyUI/embeddings).
-3. **Establish Encrypted Tunnel (for remote LAN/laptop hosts)**
-   - Run `ssh -N -L 127.0.0.1:<worker_port>:127.0.0.1:<worker_port> -R 127.0.0.1:5820:127.0.0.1:5820 <host>` so both worker enrollment/heartbeats and controller->worker RPC travel over SSH loopback.
-4. **Launch Worker & Verify Enrollment**
-   - Start `diffuser --fleet-worker /path/to/fleet-worker.json`.
-   - Call `GET /v1/fleet/workers` (or MCP `fleet_list_workers`) and confirm `"alive": true, "accepting": true` with the expected GPU UUIDs and capabilities.
-5. **Run a Smoke Job**
-   - Submit one idempotent smoke job via `POST /v1/fleet/jobs` (or MCP `fleet_submit_job`) and confirm `state == "succeeded"` and `capacity_released == true`.
+```sh
+nvidia-smi --query-gpu=uuid,name,memory.free,memory.total,utilization.gpu --format=csv
+```
+
+Match devices by full UUID. The CLI reports memory in MiB and utilization in percent. The worker publishes bytes. Enable `auto_detect_gpus` for supported local GPUs. For CPU-only operation set it to `false` with `vram_bytes: 0`. For other accelerators or cloud services, advertise the adapter's actual capability and verify placement in its output.
+
+## Provision the worker locally
+
+Create `fleet-worker.json` owned by the service account, mode `0600`, under a private directory (mode `0700`). Set `umask 077` before creating it. Render the enrollment admin bearer from the deployment's secret store and generate a fresh per-worker 32-byte random value encoded as 64 hex characters for `rpc_secret_hex`. Replace the two markers locally before launch. Keep the resulting file outside the repository and out of transcripts.
+
+This POSIX echo profile gives a deterministic, CPU-only smoke target. Set a unique capability for the enrollment check so another worker cannot satisfy it. Adjust the sample capacities, ports and executable to the inspected host.
+
+```json
+{
+  "worker_id": "worker-example",
+  "host": "worker-example",
+  "bind": "127.0.0.1:5835",
+  "advertise_url": "http://127.0.0.1:15835",
+  "controller_url": "http://127.0.0.1:15820",
+  "enroll_bearer": "<provision on worker>",
+  "rpc_secret_hex": "<generate on worker>",
+  "cpu_millicores": 1000,
+  "ram_bytes": 536870912,
+  "vram_bytes": 0,
+  "auto_detect_gpus": false,
+  "profiles": [
+    {"capability":"example.echo","adapter":{"kind":"exec","command":["/bin/cat"],"timeout_secs":30}}
+  ]
+}
+```
+
+- **Exec.** Supply a fixed argv array. The process receives the job's `input` as JSON on stdin. Emit one bounded JSON value on stdout and exit zero on success. The worker supplies `DIFFUSER_JOB_ID`, `DIFFUSER_CAPABILITY`, and the time budget in `DIFFUSER_TIMEOUT_SECS`. For a selected GPU it also sets `CUDA_VISIBLE_DEVICES` and `DIFFUSER_GPU_UUID`. Put an optional profile `gpu_uuid` inside `adapter`.
+- **HTTP.** Diffuser sends the job input as a JSON body. Point `bearer_file` at an owner-only file containing the upstream service's raw token. Verify it is readable and nonempty as the worker user. An unreadable or empty file can cause an unauthenticated request. Omit the field for a service that needs no bearer. For a GPU-backed service, verify actual placement in the service. Use a worker exposing only devices the service can honor for exact pins.
+
+```json
+{"capability":"example.transform","adapter":{"kind":"http","url":"http://127.0.0.1:8080/transform","method":"POST","timeout_secs":60,"bearer_file":"/run/secrets/adapter-bearer"}}
+```
+
+## Connect both directions over SSH
+
+For a remote worker, run this tunnel **from the worker to the controller** using a verified SSH alias. Keep the tunnel supervised. Pick a free controller-side RPC port for each worker.
+
+```sh
+ssh -nNT -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:15820:127.0.0.1:5820 \
+  -R 127.0.0.1:15835:127.0.0.1:5835 "$CONTROLLER_SSH_ALIAS"
+```
+
+The worker reaches `controller_url` on its local port 15820 for enrollment and heartbeats. Diffuser reaches `advertise_url` on its local port 15835 for signed RPC to the worker's `bind` port 5835. Ensure SSH keeps both listeners on loopback. On a single host use direct loopback ports for the same two paths.
+
+Start the installed Diffuser executable with `"$DIFFUSER_BIN" --fleet-worker "$WORKER_CONFIG"`, where `WORKER_CONFIG` is the absolute config path. Confirm a fresh heartbeat, then exercise the reverse path with a real smoke job.
+
+## Admit intermittently available workers
+
+- **Shared or gaming laptop.** Have the idle guard drain on a foreground game or foreign GPU activity. Exclude the worker's own jobs when interpreting utilization. Let running jobs finish before stopping the worker. Require continuous idle through a cooldown and healthy telemetry before resuming a guard-owned drain. Preserve operator maintenance holds. An older guard that only restarts or re-enrolls the worker needs an explicit resume step on controllers with persistent drain.
+- **Ephemeral cloud or Colab adapter.** Start with the adapter's status/health action on the provisioning host. Keep provider credentials there. Advertise a cloud execution capability with its own slot, spend and wall-time bounds. Allocate only within the authorized budget. Check the actually allocated device and reserve time to collect outputs, stop the owned session and verify its absence. Keep the lane parked or quarantined if termination is uncertain.
+
+## Prove admission, execution and release
+
+1. With an admin bearer, read `GET /v1/fleet/workers`. Find the exact ID, expected capability, capacities, `alive:true` and `accepting:true`. Check the next heartbeat advances. For a telemetry-enabled GPU worker, match `gpus_live[].uuid` to inventory and inspect `memory_free_bytes`, `memory_total_bytes` and `util_pct`. Missing or stale readings are unknown. Open `/v1/fleet/ui`, connect through the Token control and cross-check that worker's topology card. Confirm `GET /v1/fleet/discover` offers the capability to the intended scoped caller.
+2. As that caller, send the actual profile a low-cost, known input at `POST /v1/fleet/jobs` with a saved `Idempotency-Key`. For the echo profile use `{"capability":"example.echo","input":{"ok":true},"async":true}`. For a GPU profile add the discovered `pin_gpu_uuid`. Read `GET /v1/fleet/jobs/{job_id}` through completion. Check the worker ID, any pin, expected output, `succeeded` and `capacity_released:true`. For the echo, `output_sha256` must equal `4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93`. Replay the exact request and key once. Require the original job ID and `idempotent_replay:true`.
+3. Verify the controller supports resume via MCP `tools/list` (`fleet_drain_worker` advertises boolean `accepting`). For the new, healthy worker only, admin POST `{"accepting":false}` to `/v1/fleet/workers/{id}/drain`. Reread workers and discovery for `accepting:false` and withdrawal of its unique offer. POST `{"accepting":true}` to the same path and verify a fresh heartbeat, `accepting:true` and renewed discovery. A legacy controller can interpret a resume body as another drain.
+4. Record the worker ID, capability, job ID, assigned GPU if any, digest, release flag and final admission state. If the smoke receipt or telemetry required for the profile fails validation, keep the new worker drained and diagnose the failing direction or adapter. A quarantined resume requires cleanup review before return to service.

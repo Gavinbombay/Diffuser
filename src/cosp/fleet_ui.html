@@ -1,0 +1,1888 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Diffuser Fleet</title>
+<style>
+:root {
+  color-scheme: dark;
+  --canvas: #090c10;
+  --surface: #10161d;
+  --surface-raised: #171f28;
+  --surface-inset: #0c1117;
+  --surface-hover: #202c38;
+  --hairline: #2b3743;
+  --control-edge: #738394;
+  --ink: #edf3f7;
+  --ink-secondary: #b6c3cf;
+  --ink-muted: #99a9ba;
+  --accent: #72e6df;
+  --on-accent: #092024;
+  --focus: #b8f8ff;
+  --live: #73e4af;
+  --draining: #ffd07b;
+  --offline: #a9b5c4;
+  --running: #88c5ff;
+  --succeeded: #a6e98a;
+  --failed: #ff99a5;
+  --vram-track: #283442;
+  --vram-free: linear-gradient(90deg, #399baa, #80e9da);
+  --vram-low: linear-gradient(90deg, #bc8641, #ffd07b);
+  --gpu-util: linear-gradient(90deg, #577fac, #a1c9ff);
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --metric: clamp(1.5rem, 1.1rem + 1.5vw, 2.625rem);
+  --label: .8125rem;
+  --body: .9375rem;
+  --title: 1.25rem;
+  --radius-control: 6px;
+  --radius-panel: 12px;
+  --rule: 1px solid var(--hairline);
+  --gutter: 32px;
+  --gap: 16px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--canvas); color: var(--ink); font: 400 var(--body)/1.5 var(--font-ui); overflow-wrap: anywhere; }
+.frame { width: min(100%, 1600px); margin-inline: auto; padding-inline: var(--gutter); }
+header.shell { position: sticky; top: 0; z-index: 3; background: var(--canvas); border-bottom: var(--rule); }
+.top, .controls, nav, .panel-head, .worker-head, .row, .dialog-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.top { padding-block: 10px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font-size: 1.125rem; letter-spacing: -.02em; }
+.brand svg { color: var(--accent); }
+.connection { margin-left: 8px; }
+.controls { margin-left: auto; }
+nav { gap: 0 24px; }
+nav a { display: inline-flex; align-items: center; padding-block: 8px; color: var(--ink-secondary); text-decoration: none; border-bottom: 2px solid transparent; }
+nav a:hover, nav a:focus-visible { border-color: var(--accent); color: var(--ink); }
+main { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); padding-block: 24px 40px; align-items: start; }
+.kpis { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); }
+.kpi, .panel, .worker-card { min-width: 0; background: var(--surface); border: var(--rule); border-radius: var(--radius-panel); padding: 16px; }
+.kpi { align-content: start; grid-column: span 2; }
+.kpi.vram { grid-column: span 5; }
+.kpi.jobs { grid-column: span 3; }
+#fleet { grid-area: 2 / 1 / 3 / 9; }
+#jobs { grid-area: 3 / 1 / 4 / 9; }
+#playground { grid-area: 2 / 9 / 3 / 13; }
+#integration { grid-area: 3 / 9 / 4 / 13; }
+section, #capability { scroll-margin-top: 115px; }
+h1, h2, h3, p { margin: 0; }
+h2, h3, strong { font-weight: 600; }
+h2 { font-size: var(--title); }
+h3 { font-size: 1rem; }
+small, .note, .label, legend { font-size: var(--label); color: var(--ink-muted); }
+.note { margin-block: 4px 0; }
+.metric { font-size: var(--metric); line-height: 1.16; letter-spacing: -.035em; }
+.metric.compact { font-size: clamp(1.25rem, 1rem + 1vw, 2rem); }
+.mono, .metric, time, pre, textarea { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+a { color: var(--accent); }
+button, input, select, textarea, .control { font: inherit; min-width: 0; max-width: 100%; color: var(--ink); background: var(--surface-inset); border: 1px solid var(--control-edge); border-radius: var(--radius-control); padding: 6px 10px; min-height: 36px; }
+button, .control { cursor: pointer; }
+button:hover:not(:disabled), select:hover:not(:disabled) { background: var(--surface-hover); }
+button.primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--focus); }
+button:disabled { opacity: .58; cursor: default; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+:focus:not(:focus-visible) { outline-offset: 3px; }
+input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
+input[type="number"] { width: 9ch; }
+input[list], input[type="password"], textarea, #playground select { width: 100%; }
+textarea { line-height: 1.5; resize: vertical; padding: 10px; }
+label, fieldset { min-width: 0; }
+fieldset { border: var(--rule); padding: 8px 12px; margin: 0; border-radius: var(--radius-control); }
+.stack, .field { display: grid; min-width: 0; gap: 6px; }
+.stack { gap: 12px; }
+.push { margin-left: auto; }
+.panel-head { justify-content: space-between; margin-bottom: 12px; }
+.badge { display: inline-flex; align-items: center; width: fit-content; gap: 6px; border: var(--rule); border-color: currentColor; border-radius: var(--radius-control); padding: 1px 7px; color: var(--offline); font-size: var(--label); }
+.live { color: var(--live); }
+.draining { color: var(--draining); }
+.failed { color: var(--failed); }
+.running { color: var(--running); }
+.succeeded { color: var(--succeeded); }
+.dot { display: inline-block; width: 8px; height: 8px; border: 1px solid currentColor; border-radius: 50%; }
+.dot.on { background: var(--live); color: var(--live); }
+.dot.pulse { animation: pulse .65s ease-out; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 #73e4af80; } 100% { box-shadow: 0 0 0 7px #73e4af00; } }
+.band { display: flex; gap: 2px; width: 100%; margin-top: 10px; }
+.band > button, .meter { background: var(--vram-track); border: 0; min-width: 0; overflow: hidden; height: 14px; border-radius: 2px; }
+.band > button { display: flex; flex-basis: 0; min-height: 0; padding: 0; }
+.band > button:hover { background: var(--surface-hover); }
+.band > button:focus-visible { z-index: 1; }
+#device-focus.inactive { visibility: hidden; }
+.fill { height: 100%; display: block; background: var(--vram-free); transition: width .2s; }
+.fill.low { background: var(--vram-low); }
+.utilization { height: 7px; }
+.utilization .fill { background: var(--gpu-util); }
+.meter.unknown { background: repeating-linear-gradient(135deg, var(--surface-inset) 0 4px, var(--vram-track) 4px 6px); }
+.tree, .branch { padding: 0; margin: 0; list-style: none; }
+.tree > li { margin-left: 8px; }
+.branch { margin-left: 10px; }
+.tree > li, .branch > li { position: relative; padding: 10px 0 0 16px; }
+.tree > li::before, .branch > li::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; border-left: var(--rule); }
+.tree > li::after, .branch > li::after { content: ""; position: absolute; left: 0; top: 26px; width: 16px; border-top: var(--rule); }
+.tree > li:last-child::before, .branch > li:last-child::before { height: 27px; }
+.worker-card { background: var(--surface-inset); }
+.worker-head { justify-content: space-between; }
+.gpu, .resource { padding: 10px; border: var(--rule); border-radius: var(--radius-control); background: var(--surface); }
+.gpu.highlight, .gpu:focus-visible { border-color: var(--accent); }
+.branch > li:has(.highlight)::after, .tree > li:has(.highlight)::after { border-color: var(--accent); }
+#profile-timeout:empty, #input-error:empty { display: none; }
+#timeout { width: 12ch; }
+.resource { flex: 1 1 140px; }
+.pills button { font-size: var(--label); }
+.filters { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
+.filters select { width: 100%; }
+.table-wrap { min-width: 0; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { border-bottom: var(--rule); padding: 8px 6px; text-align: left; vertical-align: middle; }
+th { color: var(--ink-muted); font-size: var(--label); font-weight: 600; }
+th:first-child, th:last-child { width: 22%; }
+th:nth-last-child(2) { width: 12%; }
+tbody tr { cursor: pointer; }
+tbody tr:hover, tbody tr:focus-within { background: var(--surface-raised); }
+.id-button { width: 100%; text-align: left; }
+.id-button .ellipsis { user-select: text; }
+.ellipsis { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.id-button:focus-visible .ellipsis { white-space: normal; }
+.cell-label { display: none; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-inset); border: var(--rule); border-radius: var(--radius-control); padding: 10px; margin: 4px 0 0; font-size: var(--label); }
+details { background: var(--surface-inset); padding: 8px 10px; border: var(--rule); border-radius: var(--radius-control); }
+summary { cursor: pointer; }
+dialog { color: var(--ink); background: var(--surface-raised); border: var(--rule); border-radius: var(--radius-panel); padding: 0; width: min(450px, calc(100% - 24px)); box-shadow: 0 12px 42px #0009; }
+dialog::backdrop { background: #06090cca; }
+.dialog-head, .dialog-body { padding: 16px; }
+.dialog-head { justify-content: space-between; background: var(--surface-raised); border-bottom: var(--rule); }
+.inspector { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(560px, 100vw); height: 100%; max-height: 100%; max-width: 100%; border-radius: 0; }
+.inspector[open] { display: flex; flex-direction: column; animation: slide .18s ease-out; }
+.inspector .dialog-body { overflow: auto; }
+@keyframes slide { from { transform: translateX(3%); } to { transform: translateX(0); } }
+dl { display: grid; grid-template-columns: minmax(92px, 1fr) 2fr; gap: 6px 12px; margin: 0; }
+dt { color: var(--ink-muted); }
+dd { margin: 0; min-width: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
+@media (min-width: 1120px) {
+  .tree { max-height: min(54vh, 36rem); overflow: auto; padding: 0 8px 4px 0; }
+}
+@media (min-width: 720px) {
+  .gpu { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.5fr) minmax(0, 1fr); align-items: center; }
+}
+@media (max-width: 1119px) {
+  :root { --gutter: 24px; --gap: 12px; }
+  .kpi, .kpi.jobs, .kpi.vram { grid-column: span 6; }
+  #fleet, #jobs { grid-column: 1 / -1; }
+  #playground { grid-area: 4 / 1 / 5 / 7; }
+  #integration { grid-area: 4 / 7 / 5 / 13; }
+}
+@media (max-width: 719px) {
+  :root { --gutter: 12px; }
+  main { display: flex; flex-direction: column; padding-top: 12px; }
+  main > * { width: 100%; }
+  .controls { width: 100%; margin: 0; }
+  nav { gap: 0 12px; font-size: var(--label); }
+  button, input, select, nav a { min-height: 44px; }
+  .band > button { min-height: 0; }
+  section, #capability { scroll-margin-top: 165px; }
+  .filters { grid-template-columns: 1fr 1fr; }
+  thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  table, tbody { display: block; }
+  tbody tr { display: grid; grid-template-columns: 1fr 1fr; border: var(--rule); border-radius: var(--radius-control); padding: 8px; margin-top: 8px; }
+  tbody td { min-width: 0; border: 0; }
+  td.state-cell { grid-area: 1 / 2; }
+  .cell-label { display: block; color: var(--ink-muted); font-size: var(--label); }
+}
+@media (max-width: 360px) {
+  .kpi, .kpi.jobs, .kpi.vram { grid-column: 1 / -1; }
+  .controls { gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+@media (forced-colors: active) {
+  .meter, .band > button { border: 1px solid CanvasText; }
+  .fill, .fill.low, .utilization .fill { forced-color-adjust: none; background: Highlight; }
+  :focus-visible { outline-color: Highlight; }
+}
+</style>
+</head>
+<body>
+<header class="shell">
+  <div class="frame">
+    <div class="top">
+      <div class="brand">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none" aria-hidden="true" focusable="false">
+          <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 16h7c6 0 6-10 12-10h6"/>
+            <path d="M3 16h25"/>
+            <path d="M10 16c6 0 6 10 12 10h6"/>
+          </g>
+        </svg>
+        <strong>Diffuser</strong>
+      </div>
+      <span class="connection note"><i id="pulse" class="dot" aria-hidden="true"></i> <span id="connection">Locked</span></span>
+      <div class="controls">
+        <label for="auto">Auto</label>
+        <select id="auto">
+          <option value="0">Off</option><option value="3">3s</option><option value="10" selected>10s</option><option value="30">30s</option>
+        </select>
+        <button id="refresh" type="button" disabled>Refresh</button>
+        <button id="token" type="button">Token</button>
+        <button id="lock" type="button" hidden>Lock</button>
+      </div>
+    </div>
+    <nav aria-label="Fleet sections">
+      <a href="#fleet">Fleet</a><a href="#jobs">Jobs</a><a href="#playground">Playground</a><a href="#integration">Agent integration</a>
+    </nav>
+  </div>
+</header>
+<main class="frame">
+  <section class="kpis" aria-label="Fleet status">
+    <div class="kpi">
+      <a class="label" href="#fleet">Online workers</a><div id="online" class="metric">Locked</div><p id="accepting" class="note">Enrolled and accepting workers</p>
+    </div>
+    <div class="kpi vram">
+      <span class="label">Live VRAM</span><div id="vram" class="metric compact">Locked</div><div id="band" class="band" aria-label="Free VRAM by GPU" role="group"></div><p id="coverage" class="note"></p><p id="device-focus" class="note inactive"></p>
+    </div>
+    <div class="kpi jobs">
+      <a id="active-jobs" class="label" href="#jobs">Active jobs</a><div id="active" class="metric">Locked</div><p id="recent" class="note"></p>
+    </div>
+    <div class="kpi">
+      <a class="label" href="#capability">Available capabilities</a><div id="available" class="metric">Locked</div><p class="note">In discovery</p>
+    </div>
+  </section>
+
+  <section id="fleet" class="panel" aria-labelledby="fleet-heading">
+    <div class="panel-head"><h2 id="fleet-heading">Fleet topology</h2><p id="worker-age" class="note"></p></div>
+    <p id="fleet-message" class="note">Connect with a bearer token to read the fleet.</p>
+    <p id="admission-message" role="status" class="note"></p>
+    <div id="topology" hidden><strong>Diffuser</strong><ul id="workers" class="tree"></ul></div>
+  </section>
+
+  <section id="jobs" class="panel" aria-labelledby="jobs-heading">
+    <div class="panel-head"><h2 id="jobs-heading" tabindex="-1">Jobs and receipts</h2><span id="job-scope" class="note"></span></div>
+    <form id="filters" class="stack">
+      <div class="filters">
+        <label class="field label">State
+          <select id="filter-state"><option value="">All</option><option value="running">Running</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="failed_uncertain">Failed (uncertain)</option></select>
+        </label>
+        <label class="field label">Capability<input id="filter-capability" list="filter-capabilities" placeholder="All"></label>
+        <label class="field label">Worker<input id="filter-worker" list="filter-workers" placeholder="All"></label>
+        <label class="field label">Limit<input id="filter-limit" type="number" min="1" max="200" step="1" value="50" required></label>
+      </div>
+      <div class="row"><button id="apply-filters" type="submit" disabled>Apply filters</button><button id="clear-filters" type="button" disabled>Clear filters</button><span id="jobs-message" class="note">Locked</span></div>
+      <datalist id="filter-capabilities"></datalist><datalist id="filter-workers"></datalist>
+    </form>
+    <div class="table-wrap" id="job-table" hidden>
+      <table aria-labelledby="jobs-heading">
+        <thead><tr><th scope="col">Job ID</th><th scope="col">Capability</th><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Elapsed</th><th scope="col">Output SHA-256</th></tr></thead>
+        <tbody id="job-rows"></tbody>
+      </table>
+    </div>
+    <div id="table-copy"></div>
+  </section>
+
+  <section id="playground" class="panel" aria-labelledby="playground-heading">
+    <div class="panel-head"><h2 id="playground-heading">Capability playground</h2></div>
+    <form id="draft" class="stack" novalidate>
+      <label class="field label">Capability<select id="capability" aria-describedby="offer-description"><option value="">Select capability</option></select></label>
+      <p id="offer-description" class="note">Connect to discover capabilities.</p>
+      <label class="field label">GPU pin<select id="gpu"><option value="">Auto-select</option></select></label>
+      <fieldset><legend>Execution mode</legend><div class="row">
+        <label><input type="radio" name="execution" value="sync"> Sync</label>
+        <label><input type="radio" name="execution" id="async" value="async" checked> Async</label>
+      </div></fieldset>
+      <label class="row label">Timeout (seconds)<input id="timeout" type="number" min="1" max="21600" step="1" placeholder="Profile"></label>
+      <p id="profile-timeout" class="note"></p>
+      <div class="field"><span class="label">Idempotency-Key</span><div class="row"><code id="key"></code><button id="regenerate" type="button" disabled>Regenerate</button></div></div>
+      <div class="field">
+        <label for="input" class="label">Input JSON</label>
+        <div class="row pills" aria-label="Editable starter input shapes">
+          <button type="button" data-starter="empty">Empty object</button><button type="button" data-starter="text">Text</button><button type="button" data-starter="values">Values</button>
+        </div>
+        <textarea id="input" rows="5" spellcheck="false" aria-describedby="input-error">{}</textarea><p id="input-error" class="note failed"></p>
+      </div>
+      <div class="row"><button id="submit" type="submit" class="primary" disabled>Submit job</button><button id="retry" type="button" hidden>Retry same request</button></div>
+      <p id="submit-message" class="note" role="status"></p>
+    </form>
+    <section id="viewer" class="stack" aria-labelledby="viewer-heading" hidden>
+      <div class="panel-head"><h3 id="viewer-heading">Submission receipt</h3><button id="close-viewer" type="button">Close receipt</button></div>
+      <div id="submission-fields"></div><p id="watch-message" class="note"></p>
+      <div class="row"><button id="watch" type="button">Stop watching</button><button type="button" id="open-receipt">Open receipt</button></div>
+      <details id="submission-response"><summary>Response JSON</summary><pre></pre></details>
+    </section>
+  </section>
+
+  <section id="integration" class="panel stack" aria-labelledby="integration-heading">
+    <h2 id="integration-heading">Agent integration</h2>
+    <div class="field"><strong>POST /v1/fleet/mcp</strong><code id="mcp-endpoint"></code><button type="button" id="copy-endpoint">Copy endpoint</button></div>
+    <div class="row">
+      <button type="button" id="copy-discover">Copy discovery curl</button><button type="button" id="copy-tools">Copy MCP tools curl</button><button type="button" id="copy-call">Copy MCP call</button>
+    </div>
+    <div id="integration-copy"></div>
+    <p class="note">Send initialize, then notifications/initialized. Check HTTP status, JSON-RPC error and result.isError. For successful calls, parse the JSON in result.content[].text.</p>
+    <p class="note">Replace &lt;TOKEN&gt; in the sample. A private header file can supply credentials through curl -H @header-file.</p>
+    <p id="mcp-message" class="note">Connect to load the tool catalog.</p>
+    <div id="tools" class="stack"></div>
+  </section>
+</main>
+
+<dialog id="token-dialog" aria-labelledby="token-heading">
+  <div class="dialog-head"><h2 id="token-heading">Token Gate</h2><button id="token-close" type="button">Close</button></div>
+  <form id="token-form" class="dialog-body stack">
+    <label class="field">Bearer token<input id="bearer" type="password" autocomplete="off" spellcheck="false" autofocus required></label>
+    <label><input id="remember" type="checkbox"> Remember in this tab</label>
+    <p class="note">Use HTTPS or a trusted loopback tunnel for token entry.</p>
+    <p id="token-error" class="note failed" role="status"></p>
+    <div class="row"><button type="submit" class="primary">Connect</button><button id="clear-token" type="button">Clear token</button></div>
+  </form>
+</dialog>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-heading">
+  <div class="dialog-head"><h2 id="confirm-heading">Confirm action</h2></div>
+  <form method="dialog" class="dialog-body stack">
+    <p id="confirm-message"></p>
+    <div class="row"><button value="cancel" id="confirm-cancel" autofocus>Cancel</button><button value="confirm" id="confirm-action" class="primary">Confirm</button></div>
+  </form>
+</dialog>
+
+<dialog id="inspector" class="inspector" aria-labelledby="inspector-heading">
+  <div class="dialog-head"><h2 id="inspector-heading">Job receipt</h2><button id="close-inspector" type="button" autofocus>Close</button></div>
+  <div id="inspector-body" class="dialog-body stack">
+    <p id="detail-message" class="note"></p><div id="detail-fields"></div><div id="detail-copy"></div>
+    <details id="detail-input"><summary>Input</summary><pre></pre><button type="button" hidden>Show full JSON</button></details>
+    <details id="detail-output"><summary>Output</summary><pre></pre><button type="button" hidden>Show full JSON</button></details>
+    <details id="detail-error"><summary>Error</summary><pre></pre><button type="button" hidden>Show full JSON</button></details>
+  </div>
+</dialog>
+<p id="announcement" class="sr-only" role="status"></p>
+<script>
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const paths = Object.fromEntries(["discover", "workers", "jobs", "mcp"].map(
+    (name) => [name, new URL(name, location.href).href]
+  ));
+  const storageKey = "diffuser.fleet.token.v1";
+  const gib = 2 ** 30;
+  const recentWindow = 24 * 60 * 60 * 1000;
+  const expectedTools = new Map([
+    ["fleet_discover", "Caller"], ["fleet_list_workers", "Admin"],
+    ["fleet_list_jobs", "Caller, scoped rows"], ["fleet_submit_job", "Caller, allowed capabilities"],
+    ["fleet_get_job", "Caller, scoped record"], ["fleet_drain_worker", "Admin"],
+    ["fleet_issue_token", "Admin"], ["fleet_revoke_token", "Admin"]
+  ]);
+  const isArray = Array.isArray;
+  const array = (value) => isArray(value) ? value : [];
+  const string = (value) => typeof value === "string" ? value : "";
+  const finite = (value) => typeof value === "number" && Number.isFinite(value);
+  const nonnegative = (value) => finite(value) && value >= 0;
+  const validUtil = (value) => nonnegative(value) && value <= 100;
+  const stateLabels = new Map([
+    ["running", ["▶", "Running", "running"]], ["succeeded", ["✓", "Succeeded", "succeeded"]],
+    ["failed", ["×", "Failed", "failed"]], ["failed_uncertain", ["×", "Failed (uncertain)", "failed"]]
+  ]);
+  const starters = { empty: {}, text: { text: "hello" }, values: { values: [1, 2, 3] } };
+  const defaults = () => ({ state: "", capability: "", worker_id: "", limit: 50 });
+  let bearer = "";
+  let generation = 0;
+  let session = newSession();
+  let autoTimer = 0;
+  let draft = newDraft();
+  let inspector = null;
+  let viewer = null;
+  let attempt = null;
+  let confirming = null;
+  let lockedText = "Locked";
+  let suspended = false;
+
+  function newSession() {
+    return {
+      generation: ++generation,
+      controller: new AbortController(),
+      reads: new Map(),
+      workers: new Map(),
+      offers: new Map(),
+      watches: new Map(),
+      admission: new Set(),
+      sources: new Map(),
+      filters: defaults(),
+      filterVersion: 0,
+      inventory: "loading",
+      history: "loading",
+      updating: null,
+      connected: false,
+      pending: false
+    };
+  }
+
+  function newDraft() {
+    return { capability: "", pin: "", key: bearer ? randomKey() : "", sent: false };
+  }
+
+  function randomKey() {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function current(context) {
+    return session.generation === context.generation && !context.controller.signal.aborted;
+  }
+
+  function hasBearer(text) {
+    return bearer !== "" && typeof text === "string" && text.includes(bearer);
+  }
+
+  function mask(text) {
+    return hasBearer(text) ? text.split(bearer).join("[redacted]") : text;
+  }
+
+  function privateKey(key) {
+    return /(?:authorization|bearer|token|password|passwd|secret|credential|api[_-]?key|private[_-]?key)/i.test(key);
+  }
+
+  function redact(value) {
+    if (typeof value === "string") return mask(value);
+    if (isArray(value)) return value.map(redact);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(
+        ([key, entry]) => [mask(key), privateKey(key) ? "[redacted]" : redact(entry)]
+      ));
+    }
+    return value;
+  }
+
+  function pretty(value) {
+    return mask(JSON.stringify(redact(value), null, 2));
+  }
+
+  function node(tag, text, className) {
+    const element = document.createElement(tag);
+    if (text !== undefined) element.textContent = mask(String(text));
+    if (className) element.className = className;
+    return element;
+  }
+
+  function put(id, text) {
+    $(id).textContent = mask(String(text));
+  }
+
+  function button(label, action, key) {
+    const element = node("button", label);
+    element.type = "button";
+    element.addEventListener("click", action);
+    if (key !== undefined) element.dataset.focusKey = mask(String(key));
+    return element;
+  }
+
+  function replaceRegion(container, content, fallback) {
+    const active = document.activeElement;
+    const key = container.contains(active) ? active.dataset.focusKey : undefined;
+    const details = new Set(Array.from(container.querySelectorAll("details[open]"), (entry) => entry.dataset.focusKey));
+    const scrollTop = container.scrollTop;
+    container.replaceChildren(content);
+    container.scrollTop = scrollTop;
+    for (const entry of container.querySelectorAll("details")) entry.open = details.has(entry.dataset.focusKey);
+    if (key !== undefined) {
+      const next = Array.from(container.querySelectorAll("[data-focus-key]:not(details)")).find(
+        (entry) => entry.dataset.focusKey === key
+      );
+      (next || fallback)?.focus({ preventScroll: true });
+    }
+  }
+
+  function option(value, label = value) {
+    const element = node("option", label);
+    element.value = hasBearer(value) ? "" : value;
+    return element;
+  }
+
+  function setOptions(select, choices, selected, missingLabel) {
+    const entries = choices.slice();
+    if (selected && !entries.some(([value]) => value === selected)) entries.push([selected, missingLabel]);
+    if (entries.length !== select.options.length || entries.some(([value, label], index) =>
+      select.options[index]?.value !== value || select.options[index]?.textContent !== mask(label)
+    )) {
+      select.replaceChildren(...entries.map(([value, label]) => option(value, label)));
+    }
+    select.value = selected;
+  }
+
+  function idPath(id) {
+    if (!id || id === "." || id === ".." || hasBearer(id)) throw new Error("Invalid identifier");
+    return encodeURIComponent(id);
+  }
+
+  function fleetUrl(base, suffix = "", query) {
+    const url = new URL(base + suffix);
+    if (query) url.search = query.toString();
+    return url;
+  }
+
+  async function request(context, url, options = {}) {
+    if (!bearer || !current(context) || hasBearer(decodeURIComponent(url.pathname)) ||
+        Array.from(url.searchParams).some(([key, value]) => hasBearer(key) || hasBearer(value))) {
+      throw new Error("Unavailable request");
+    }
+    const headers = new Headers({ Accept: "application/json", Authorization: "Bearer " + bearer });
+    if (options.body !== undefined) headers.set("Content-Type", "application/json");
+    if (options.key) headers.set("Idempotency-Key", options.key);
+    const response = await fetch(url, {
+      method: options.method || "GET", body: options.body, headers,
+      mode: "same-origin", credentials: "omit", cache: "no-store", redirect: "error",
+      signal: options.signal || context.controller.signal
+    });
+    const raw = await response.text();
+    let body = null;
+    try { body = JSON.parse(raw); } catch { /* A proxy can return a non-JSON error. */ }
+    if (!current(context)) throw new Error("Expired request");
+    const date = Date.parse(response.headers.get("Date") || "");
+    return {
+      ok: response.ok, status: response.status, body,
+      date: Number.isFinite(date) ? date : Date.now(), datePrecision: Number.isFinite(date) ? 999 : 0
+    };
+  }
+
+  function sharedRead(context, name, url, options) {
+    if (context.reads.has(name)) return context.reads.get(name);
+    const reading = request(context, url, options).finally(() => {
+      if (context.reads.get(name) === reading) context.reads.delete(name);
+    });
+    context.reads.set(name, reading);
+    return reading;
+  }
+
+  function announce(message) {
+    put("announcement", message);
+  }
+
+  function storage(action, value) {
+    try {
+      if (action === "read") return sessionStorage.getItem(storageKey) || "";
+      if (action === "write") sessionStorage.setItem(storageKey, value);
+      else sessionStorage.removeItem(storageKey);
+      return true;
+    } catch {
+      return action === "read" ? "" : false;
+    }
+  }
+
+  function replaceCredential(next, remember, message = "Locked") {
+    session.controller.abort();
+    for (const watch of session.watches.values()) stopDetail(watch);
+    clearTimeout(autoTimer);
+    if ($("confirm-dialog").open) $("confirm-dialog").close("cancel");
+    $("confirm-message").textContent = "";
+    if ($("inspector").open) $("inspector").close();
+    inspector = null;
+    viewer = null;
+    attempt = null;
+    bearer = next;
+    lockedText = message;
+    session = newSession();
+    draft = newDraft();
+    const stored = remember === null || storage(remember && next ? "write" : "remove", next);
+    $("bearer").value = "";
+    $("remember").checked = Boolean(remember && next && stored);
+    $("draft").reset();
+    $("filters").reset();
+    $("input-error").textContent = "";
+    $("submit-message").textContent = "";
+    $("admission-message").textContent = "";
+    $("table-copy").replaceChildren();
+    $("integration-copy").replaceChildren();
+    $("detail-copy").replaceChildren();
+    $("submission-response").open = false;
+    $("pulse").className = "dot";
+    clearDetail();
+    renderViewer();
+    renderConnection();
+    renderSnapshot();
+    if (next && !suspended) refresh(true);
+    return stored;
+  }
+
+  function renderConnection() {
+    const source = session.sources.get("discover");
+    let text = lockedText;
+    if (bearer) {
+      if (source?.failed) text = source.at ? "Unavailable · last read " + age(source.at) + " ago" : "Fleet unavailable";
+      else text = source?.at ? "Connected · updated " + age(source.at) + " ago" : "Connecting…";
+    }
+    put("connection", text);
+    $("refresh").disabled = !bearer;
+    $("lock").hidden = !bearer;
+    $("pulse").classList.toggle("on", Boolean(bearer && source?.at && !source.failed));
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(autoTimer);
+    const seconds = Number($("auto").value);
+    if (!bearer || suspended || document.hidden || !seconds) return;
+    const failed = Array.from(session.sources.values()).some((source) => source.failed);
+    autoTimer = setTimeout(() => refresh(false), (failed ? 30 : seconds) * 1000);
+  }
+
+  function acceptRead(context, name, ok) {
+    if (ok) context.sources.set(name, { at: Date.now(), failed: false });
+    else context.sources.set(name, { ...context.sources.get(name), failed: true });
+  }
+
+  function readError(response) {
+    return string(response?.body?.error?.code);
+  }
+
+  async function readDiscovery(context) {
+    let response;
+    try { response = await sharedRead(context, "discover", fleetUrl(paths.discover)); } catch { /* handled below */ }
+    if (!current(context)) return false;
+    if (response?.status === 401 || (response?.status === 503 && readError(response) === "fleet_closed")) {
+      const message = response.status === 401 ? "Locked · token rejected" : "Fleet closed";
+      replaceCredential("", false, message);
+      announce(message);
+      return false;
+    }
+    const ok = response?.ok && isArray(response.body?.capabilities);
+    acceptRead(context, "discover", ok);
+    if (ok) {
+      if (!context.connected) announce("Connected");
+      context.connected = true;
+      context.offers = collectOffers(response.body.capabilities);
+      $("pulse").classList.remove("pulse");
+      void $("pulse").offsetWidth;
+      $("pulse").classList.add("pulse");
+    }
+    renderConnection();
+    renderFleet();
+    renderCounts();
+    renderDraft();
+    renderFilterOptions();
+    if (!context.connected) {
+      renderJobs();
+      renderTools();
+    }
+    return Boolean(ok);
+  }
+
+  async function readWorkers(context) {
+    let response;
+    try { response = await sharedRead(context, "workers", fleetUrl(paths.workers)); } catch { /* handled below */ }
+    if (!current(context)) return;
+    if (response?.status === 401 || response?.status === 403) {
+      context.inventory = "scoped";
+      context.workers.clear();
+      context.sources.delete("workers");
+    } else {
+      const ok = response?.ok && isArray(response.body?.workers);
+      acceptRead(context, "workers", ok);
+      if (ok) {
+        context.inventory = "admin";
+        context.workers = new Map(response.body.workers.filter(
+          (worker) => string(worker?.worker_id)
+        ).map((worker) => [worker.worker_id, normalizeWorker(worker)]));
+      }
+    }
+    renderFleet();
+    renderJobs();
+    renderFilterOptions();
+  }
+
+  async function readTools(context) {
+    const envelope = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
+    let response;
+    try {
+      response = await sharedRead(context, "tools", fleetUrl(paths.mcp), {
+        method: "POST", body: JSON.stringify(envelope)
+      });
+    } catch { /* handled below */ }
+    if (!current(context)) return;
+    const tools = response?.body?.result?.tools;
+    const ok = response?.ok && response.body?.id === envelope.id && isArray(tools);
+    acceptRead(context, "tools", ok);
+    if (ok) context.tools = tools;
+    renderTools();
+    renderFleet();
+  }
+
+  function jobQuery(filters) {
+    const query = new URLSearchParams();
+    for (const name of ["state", "capability", "worker_id"]) {
+      if (filters[name]) query.set(name, filters[name]);
+    }
+    query.set("limit", String(filters.limit));
+    return query;
+  }
+
+  async function readHistory(context, group, filters) {
+    if (context.history === "unsupported") return;
+    const version = context.filterVersion;
+    const query = jobQuery(filters);
+    let response;
+    try {
+      response = await sharedRead(context, "jobs?" + query, fleetUrl(paths.jobs, "", query));
+    } catch { /* handled below */ }
+    if (!current(context) || (group === "table" && version !== context.filterVersion)) return;
+    if (response?.status === 404 || response?.status === 405) {
+      context.history = "unsupported";
+      context.historyRows = null;
+      delete context.activeCount;
+      delete context.recentCount;
+    } else if (context.history !== "unsupported") {
+      const rows = response?.body?.jobs;
+      const ok = response?.ok && isArray(rows);
+      acceptRead(context, group, ok);
+      if (ok) {
+        context.history = "ready";
+        if (group === "table") context.historyRows = rows;
+        if (group === "active") context.activeCount = rows.length;
+        if (group === "recent") {
+          context.recentCount = rows.filter((row) => finite(row?.created_at_ms) &&
+            row.created_at_ms >= response.date - recentWindow && row.created_at_ms <= response.date + response.datePrecision
+          ).length;
+        }
+      }
+    }
+    renderJobs();
+    renderCounts();
+  }
+
+  function refresh(manual) {
+    const context = session;
+    if (!bearer || suspended || (!manual && document.hidden)) return Promise.resolve();
+    if (context.updating) {
+      if (manual && !context.refreshingTools) {
+        context.refreshingTools = true;
+        context.extraTools = readTools(context);
+      }
+      return context.updating;
+    }
+    clearTimeout(autoTimer);
+    context.refreshingTools = manual || !context.connected;
+    context.updating = (async () => {
+      const connected = await readDiscovery(context);
+      if (!current(context) || (!connected && !context.connected)) return;
+      const reads = [
+        readWorkers(context), readHistory(context, "table", context.filters),
+        readHistory(context, "active", { state: "running", limit: 200 }),
+        readHistory(context, "recent", { limit: 200 })
+      ];
+      if (context.refreshingTools) reads.push(context.extraTools || readTools(context));
+      await Promise.allSettled(reads);
+    })().finally(() => {
+      context.updating = null;
+      context.extraTools = null;
+      context.refreshingTools = false;
+      if (current(context)) scheduleRefresh();
+    });
+    return context.updating;
+  }
+
+  function age(ms) {
+    return elapsed(Date.now() - ms);
+  }
+
+  function elapsed(ms) {
+    if (!finite(ms)) return "Unknown";
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    return seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "m " + seconds % 60 + "s";
+  }
+
+  function dated(name) {
+    const source = session.sources.get(name);
+    if (!source) return "";
+    if (!source.at) return source.failed ? "Unavailable" : "";
+    return (source.failed ? "Unavailable · last read " : "Last read ") + age(source.at) + " ago";
+  }
+
+  function collectOffers(capabilities) {
+    const offers = new Map();
+    for (const offer of capabilities) {
+      const capability = string(offer?.capability);
+      if (!capability.trim() || hasBearer(capability)) continue;
+      if (!offers.has(capability)) offers.set(capability, []);
+      offers.get(capability).push(offer);
+    }
+    return offers;
+  }
+
+  function gpuChoices(offers) {
+    const choices = new Map();
+    function add(uuid, name) {
+      if (string(uuid).trim() && !hasBearer(uuid) && (!choices.has(uuid) || name)) {
+        choices.set(uuid, string(name));
+      }
+    }
+    for (const offer of offers) {
+      add(offer.gpu_uuid, "");
+      for (const gpu of array(offer.gpus)) add(gpu?.uuid, gpu?.name);
+    }
+    return choices;
+  }
+
+  function offersPin(offers, pin) {
+    return !hasBearer(pin) && offers.some((offer) => offer.gpu_uuid ?
+      offer.gpu_uuid === pin : array(offer.gpus).some((gpu) => gpu?.uuid === pin)
+    );
+  }
+
+  function normalizeWorker(worker) {
+    const devices = new Map();
+    const samples = new Map();
+    for (const gpu of array(worker.gpus)) {
+      if (string(gpu?.uuid)) devices.set(gpu.uuid, { uuid: gpu.uuid, name: string(gpu.name) });
+    }
+    for (const live of array(worker.gpus_live)) {
+      const uuid = string(live?.uuid);
+      if (!uuid) continue;
+      if (!devices.has(uuid)) devices.set(uuid, { uuid, name: string(live.name) });
+      samples.set(uuid, samples.has(uuid) ? null : live);
+    }
+    const gpus = [...devices.values()].sort((a, b) => a.uuid.localeCompare(b.uuid)).map((gpu) => {
+      const sample = samples.get(gpu.uuid);
+      const free = sample?.memory_free_bytes;
+      const total = sample?.memory_total_bytes;
+      const memory = nonnegative(free) && finite(total) && total > 0 && free <= total ? { free, total } : null;
+      const util = validUtil(sample?.util_pct) ? sample.util_pct : null;
+      return { ...gpu, memory, util };
+    });
+    const hasAggregate = nonnegative(worker.live_vram_free) || validUtil(worker.gpu_util_pct);
+    return {
+      id: worker.worker_id, host: string(worker.host), status: string(worker.status),
+      accepting: worker.accepting === true, alive: worker.alive, heartbeat: worker.last_heartbeat_ms,
+      gpus, capabilities: array(worker.capabilities),
+      cpu: [worker.cpu_free, worker.cpu_total], ram: [worker.ram_free, worker.ram_total],
+      accountedVram: [worker.vram_free, worker.vram_total],
+      aggregate: hasAggregate && !gpus.some((entry) => entry.memory || entry.util !== null) ?
+        [worker.live_vram_free, worker.gpu_util_pct] : null
+    };
+  }
+
+  function gibText(bytes) {
+    return (bytes / gib).toFixed(1);
+  }
+
+  function deviceText(worker, gpu) {
+    return worker.id + " · " + (gpu.name || gpu.uuid) + " · " +
+      gibText(gpu.memory.free) + " / " + gibText(gpu.memory.total) + " GiB free";
+  }
+
+  function gpuKey(worker, gpu) {
+    return "gpu:" + JSON.stringify([worker.id, gpu.uuid]);
+  }
+
+  function findDevice(key) {
+    return Array.from($("workers").querySelectorAll(".gpu")).find((card) => card.dataset.focusKey === mask(key));
+  }
+
+  function spotlight(key, label) {
+    for (const row of $("workers").querySelectorAll(".highlight")) row.classList.remove("highlight");
+    if (key) findDevice(key)?.classList.add("highlight");
+    $("device-focus").classList.toggle("inactive", !label);
+    if (label) put("device-focus", label);
+  }
+
+  function fill(percent, low) {
+    const bar = node("span", undefined, low ? "fill low" : "fill");
+    bar.style.width = Math.max(0, Math.min(percent, 100)) + "%";
+    return bar;
+  }
+
+  function meter(label, percent, low, util = false) {
+    const element = node("div", undefined, "meter" + (util ? " utilization" : "") + (percent === null ? " unknown" : ""));
+    element.setAttribute("role", "img");
+    element.setAttribute("aria-label", mask(label));
+    if (percent !== null) element.append(fill(percent, low));
+    return element;
+  }
+
+  function renderCapacity(workers) {
+    const online = workers.filter((worker) => worker.alive === true);
+    const devices = online.flatMap((worker) => worker.gpus.map((gpu) => ({ worker, gpu })));
+    const samples = devices.filter(({ gpu }) => gpu.memory);
+    const aggregateOnly = online.filter((worker) => worker.aggregate && !worker.gpus.length).length;
+    const free = samples.reduce((sum, { gpu }) => sum + gpu.memory.free, 0);
+    const total = samples.reduce((sum, { gpu }) => sum + gpu.memory.total, 0);
+    put("online", online.length + " / " + workers.length);
+    put("accepting", workers.filter((worker) => worker.accepting).length + " accepting");
+    put("vram", samples.length ? gibText(free) + " GiB free / " + gibText(total) + " GiB measured total" :
+      online.length && !devices.length && !aggregateOnly && online.every((worker) => worker.accountedVram[1] === 0) ?
+        "No GPUs reported" : "No live VRAM samples");
+    const coverage = devices.length ? samples.length + " of " + devices.length + " known GPUs reporting" : "";
+    put("coverage", [coverage, aggregateOnly ? aggregateOnly + " aggregate-only (device count unknown)" : ""].filter(Boolean).join(" · "));
+    const band = document.createDocumentFragment();
+    for (const { worker, gpu } of samples) {
+      const key = gpuKey(worker, gpu);
+      const label = deviceText(worker, gpu);
+      const percent = gpu.memory.free / gpu.memory.total * 100;
+      const segment = button("", () => {
+        const card = findDevice(key);
+        card?.scrollIntoView({ block: "nearest" });
+        card?.focus({ preventScroll: true });
+      }, "band:" + key);
+      segment.style.flexGrow = String(gpu.memory.total / total);
+      segment.setAttribute("aria-label", mask(label + (percent < 10 ? " · Low free VRAM" : "")));
+      segment.title = mask(label);
+      segment.append(fill(percent, percent < 10));
+      segment.addEventListener("focus", () => spotlight(key, label));
+      segment.addEventListener("blur", () => spotlight(null));
+      band.append(segment);
+    }
+    replaceRegion($("band"), band);
+  }
+
+  function badge(glyph, label, tone) {
+    const chip = node("span", undefined, "badge " + tone);
+    const icon = node("span", glyph);
+    icon.setAttribute("aria-hidden", "true");
+    chip.append(icon, node("span", label));
+    return chip;
+  }
+
+  function workerBadge(worker) {
+    if (worker.alive === false) return badge("○", "Stale", "");
+    if (worker.status === "draining") return badge("Ⅱ", "Draining", "draining");
+    if (worker.status === "quarantined") return badge("×", "Quarantined", "failed");
+    if (worker.accepting) return badge("●", "Alive", "live");
+    return badge("○", "Unknown", "");
+  }
+
+  function gpuCard(worker, gpu) {
+    const row = node("div", undefined, "gpu stack");
+    const key = gpuKey(worker, gpu);
+    row.dataset.focusKey = mask(key);
+    row.tabIndex = 0;
+    const identity = node("div");
+    identity.append(node("strong", gpu.name || "GPU"), node("p", gpu.uuid, "note mono"));
+    const percent = gpu.memory ? gpu.memory.free / gpu.memory.total * 100 : null;
+    const memory = gpu.memory ? gibText(gpu.memory.free) + " / " + gibText(gpu.memory.total) + " GiB" : "No current sample";
+    const util = gpu.util === null ? "No current sample" : gpu.util + "%";
+    const memoryLabel = "Free VRAM · " + memory;
+    const utilizationLabel = "Utilization · " + util;
+    const vram = node("div", undefined, "field");
+    vram.append(node("span", memoryLabel, "label"), meter(memoryLabel, percent, percent !== null && percent < 10));
+    const usage = node("div", undefined, "field");
+    usage.append(node("span", utilizationLabel, "label"), meter(utilizationLabel, gpu.util, false, true));
+    if (percent !== null && percent < 10) vram.append(node("span", "Low free VRAM", "note draining"));
+    if (worker.alive === false && (gpu.memory || gpu.util !== null)) identity.append(node("span", "Last sample", "note"));
+    row.append(identity, vram, usage);
+    if (gpu.memory) {
+      row.addEventListener("focus", () => spotlight(key, deviceText(worker, gpu)));
+      row.addEventListener("blur", () => spotlight(null));
+    }
+    const item = node("li");
+    item.append(row);
+    return item;
+  }
+
+  function accounting(label, pair, divisor, unit) {
+    const box = node("div", undefined, "resource");
+    const amount = pair.every(nonnegative) ? pair.map((value) => (value / divisor).toFixed(1)).join(" / ") + " " + unit : "Unknown";
+    box.append(node("span", label, "label"), node("div", amount, "mono"), node("p", "Unreserved / total", "note"));
+    return box;
+  }
+
+  function supportsAdmission() {
+    return array(session.tools).some((tool) => tool?.name === "fleet_drain_worker" &&
+      tool.inputSchema?.properties?.accepting?.type === "boolean");
+  }
+
+  function workerCard(worker) {
+    const card = node("article", undefined, "worker-card stack");
+    const header = node("div", undefined, "worker-head");
+    const identity = node("div");
+    const seen = node("p", finite(worker.heartbeat) ? "Last seen " + age(worker.heartbeat) + " ago" : "Heartbeat unknown", "note");
+    if (finite(worker.heartbeat)) seen.dataset.seen = String(worker.heartbeat);
+    identity.append(node("h3", worker.id), node("p", worker.host || "Host unknown", "note"), seen);
+    const flags = node("div", undefined, "field");
+    flags.append(workerBadge(worker));
+    if (worker.alive === false && ["draining", "quarantined"].includes(worker.status)) flags.append(node("span", worker.status, "note"));
+    header.append(identity, flags);
+    card.append(header);
+    if (worker.gpus.length) {
+      const branch = node("ul", undefined, "branch");
+      for (const gpu of worker.gpus) branch.append(gpuCard(worker, gpu));
+      card.append(branch);
+    }
+    if (worker.aggregate) {
+      const [memory, util] = worker.aggregate;
+      const values = [nonnegative(memory) ? gibText(memory) + " GiB free" : "", validUtil(util) ? util + "% utilization" : ""];
+      card.append(node("p", "Last reported worker aggregate · " + values.filter(Boolean).join(" · "), "note"));
+    }
+    const resources = node("div", undefined, "row");
+    resources.append(accounting("CPU", worker.cpu, 1000, "cores"), accounting("RAM", worker.ram, gib, "GiB"),
+      accounting("Scheduler VRAM", worker.accountedVram, gib, "GiB"));
+    card.append(resources);
+    const offers = node("div", undefined, "row pills");
+    for (const [index, offer] of worker.capabilities.entries()) {
+      const capability = string(offer?.capability);
+      const pin = string(offer?.gpu_uuid);
+      if (!capability) continue;
+      const available = session.offers.get(capability);
+      const eligible = available && (!pin || offersPin(available, pin));
+      const chip = button(capability, () => selectOffer(capability, pin), "offer:" + worker.id + ":" + index);
+      chip.disabled = !eligible;
+      if (!eligible) {
+        chip.textContent = mask(capability + " (unavailable)");
+        chip.title = "This capability and GPU pair is not in current discovery";
+      }
+      offers.append(chip);
+    }
+    if (offers.childElementCount) card.append(offers);
+    const resume = worker.status === "draining" || worker.status === "quarantined";
+    const supported = supportsAdmission();
+    const action = button(resume ? "Resume worker" : "Drain worker", () => changeAdmission(worker.id, resume), "admission:" + worker.id);
+    action.disabled = session.admission.has(worker.id) || session.sources.get("workers")?.failed === true ||
+      worker.status === "quarantined" || (resume ? !supported : !supported && !worker.accepting);
+    if (worker.status === "quarantined") action.title = "Quarantined workers require recovery";
+    else if (resume && !supported) action.title = "Resume unavailable on this controller";
+    card.append(node("div", undefined, "row"));
+    card.lastChild.append(action);
+    const item = node("li");
+    item.append(card);
+    return item;
+  }
+
+  function renderFleet() {
+    const workers = [...session.workers.values()].sort((a, b) => a.id.localeCompare(b.id));
+    const admin = session.inventory === "admin";
+    $("topology").hidden = !admin || !workers.length;
+    let message = "";
+    if (!bearer) message = lockedText === "Fleet closed" ? lockedText : "Connect with a bearer token to read the fleet.";
+    else if (session.inventory === "scoped") message = "Worker inventory requires an admin token";
+    else if (session.sources.get("workers")?.failed || (!session.connected && session.sources.get("discover")?.failed)) message = "Worker inventory unavailable";
+    else if (admin && !workers.length) message = "No workers enrolled";
+    else if (!admin) message = "Waiting for worker inventory…";
+    put("fleet-message", message);
+    put("worker-age", dated("workers"));
+    const list = document.createDocumentFragment();
+    if (admin) {
+      for (const worker of workers) list.append(workerCard(worker));
+      replaceRegion($("workers"), list);
+      renderCapacity(workers);
+    } else {
+      replaceRegion($("workers"), list);
+      $("band").replaceChildren();
+      spotlight(null);
+      put("device-focus", "");
+      const status = session.inventory === "scoped" ? "Admin only" : bearer ?
+        (message === "Worker inventory unavailable" ? "Unavailable" : "Loading…") : lockedText === "Fleet closed" ? "Fleet closed" : "Locked";
+      put("online", status);
+      put("vram", status);
+      put("accepting", "");
+      put("coverage", "");
+    }
+  }
+
+  function runConfirmation(title, message, confirmLabel, cancelLabel = "Cancel") {
+    const dialog = $("confirm-dialog");
+    if (confirming) return Promise.resolve(false);
+    put("confirm-heading", title);
+    put("confirm-message", message);
+    put("confirm-action", confirmLabel);
+    put("confirm-cancel", cancelLabel);
+    dialog.returnValue = "";
+    const opener = document.activeElement;
+    dialog.showModal();
+    return new Promise((resolve) => { confirming = { opener, resolve }; });
+  }
+
+  async function changeAdmission(workerId, resume) {
+    const context = session;
+    const worker = context.workers.get(workerId);
+    if (!worker || context.inventory !== "admin" || context.admission.has(workerId)) return;
+    const supported = supportsAdmission();
+    if (worker.status === "quarantined" || (resume && !supported) || (!supported && !worker.accepting)) return;
+    const confirmed = await runConfirmation(resume ? "Resume worker" : "Drain worker",
+      resume ? "Resume " + workerId + "? Scheduling also requires a fresh heartbeat." :
+        "Drain " + workerId + "? New assignments stop and existing jobs finish.", resume ? "Resume" : "Drain");
+    if (!confirmed || !current(context) || context.admission.has(workerId)) return;
+    if (context.inventory !== "admin" || context.sources.get("workers")?.failed) return;
+    const fresh = context.workers.get(workerId);
+    if (!fresh || fresh.status !== worker.status || supportsAdmission() !== supported ||
+        (!supported && !fresh.accepting)) return;
+    context.admission.add(workerId);
+    renderFleet();
+    put("admission-message", "Updating admission…");
+    const deadline = new AbortController();
+    const timeout = setTimeout(() => deadline.abort(), 10000);
+    const cancel = () => deadline.abort();
+    context.controller.signal.addEventListener("abort", cancel, { once: true });
+    let message;
+    try {
+      const result = await request(context, fleetUrl(paths.workers, "/" + idPath(workerId) + "/drain"), {
+        method: "POST", body: supported ? JSON.stringify({ accepting: resume }) : undefined, signal: deadline.signal
+      });
+      message = result.ok ? workerId + " · " + string(result.body?.status) :
+        result.status === 409 ? "Worker is quarantined" : "Admission update failed · HTTP " + result.status;
+    } catch {
+      message = "Admission outcome unknown. Checking worker state.";
+    } finally {
+      clearTimeout(timeout);
+      context.controller.signal.removeEventListener("abort", cancel);
+    }
+    if (!current(context)) return;
+    put("admission-message", message);
+    if (context.updating) await context.updating;
+    if (!current(context)) return;
+    await Promise.allSettled([readWorkers(context), readDiscovery(context)]);
+    if (!current(context)) return;
+    context.admission.delete(workerId);
+    renderFleet();
+  }
+
+  function countText(id, count, prefix = "", suffix = "") {
+    const full = count >= 200;
+    put(id, prefix + (full ? "200+" : count) + suffix);
+    if (full) $(id).setAttribute("aria-label", prefix + "At least 200" + suffix);
+    else $(id).removeAttribute("aria-label");
+  }
+
+  function renderCounts() {
+    const label = !bearer ? lockedText === "Fleet closed" ? "Fleet closed" : "Locked" :
+      session.history === "unsupported" ? "Unavailable" : "Loading…";
+    if (session.activeCount === undefined) {
+      put("active", session.sources.get("active")?.failed ? "Unavailable" : label);
+      $("active").removeAttribute("aria-label");
+    } else countText("active", session.activeCount);
+    if (session.recentCount === undefined) {
+      put("recent", session.history === "unsupported" ? "Job history unavailable" :
+        session.sources.get("recent")?.failed ? "Recent count unavailable" : "");
+      $("recent").removeAttribute("aria-label");
+    } else {
+      const aged = ["active", "recent"].filter((source) => session.sources.get(source)?.failed);
+      const suffix = " in 24h" + (aged.length ? " · " + dated(aged[0]) : "");
+      countText("recent", session.recentCount, "", suffix);
+    }
+    const discover = session.sources.get("discover");
+    put("available", discover?.at ? session.offers.size : discover?.failed ? "Unavailable" : !bearer ?
+      lockedText === "Fleet closed" ? "Fleet closed" : "Locked" : "Loading…");
+  }
+
+  function digestOf(value) {
+    return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) && !hasBearer(value) ? value : "";
+  }
+
+  function copyField(target, label, value) {
+    const group = node("label", undefined, "field");
+    group.append(node("span", label + " · select and copy", "label"));
+    const field = node("textarea");
+    field.readOnly = true;
+    field.rows = 3;
+    field.value = value;
+    group.append(field);
+    target.replaceChildren(group);
+    field.focus();
+    field.select();
+  }
+
+  function copyButton(label, action, key) {
+    const control = button(label, action, key);
+    control.addEventListener("mousedown", (event) => event.preventDefault());
+    return control;
+  }
+
+  async function copyValue(value, label, target, literal = false) {
+    if (!value || (!literal && hasBearer(value))) return;
+    const context = session;
+    try {
+      await navigator.clipboard.writeText(value);
+      if (current(context)) announce(label + " copied");
+    } catch {
+      const dialog = target.closest("dialog");
+      if (current(context) && (!dialog || dialog.open)) copyField(target, label, value);
+    }
+  }
+
+  function cell(label, content) {
+    const td = node("td");
+    td.append(node("span", label, "cell-label"), content);
+    return td;
+  }
+
+  function stateBadge(state) {
+    return badge(...(stateLabels.get(state) || ["○", string(state) || "Unknown", ""]));
+  }
+
+  function receiptElapsed(row) {
+    if (!finite(row.created_at_ms)) return "Unknown";
+    return elapsed((row.state === "running" ? Date.now() : row.updated_at_ms) - row.created_at_ms);
+  }
+
+  function jobRow(job) {
+    const row = node("tr");
+    const id = string(job.job_id);
+    const inspect = button("", () => openInspector(id, inspect), "job:" + id);
+    inspect.classList.add("id-button");
+    const code = node("span", id || "Unknown", "mono ellipsis");
+    code.title = mask(id);
+    inspect.append(code);
+    inspect.setAttribute("aria-label", mask("Inspect job " + id));
+    inspect.disabled = !id || id === "." || id === ".." || hasBearer(id);
+    row.addEventListener("click", (event) => {
+      if (!event.target.closest("button") && !getSelection()?.toString() && !inspect.disabled) openInspector(id, inspect);
+    });
+    const duration = node("span", receiptElapsed(job), "mono");
+    if (job.state === "running" && finite(job.created_at_ms)) duration.dataset.created = String(job.created_at_ms);
+    const digest = digestOf(job.output_sha256);
+    const summary = node("span", digest ? digest.slice(0, 8) + "…" + digest.slice(-6) : "Unavailable", "mono");
+    const digestCell = cell("Output SHA-256", summary);
+    if (digest) {
+      const copy = copyButton("Copy", () => copyValue(digest, "SHA-256 digest", $("table-copy")), "digest:" + id);
+      copy.setAttribute("aria-label", mask("Copy SHA-256 for job " + id));
+      digestCell.append(copy);
+    }
+    const state = cell("State", stateBadge(job.state));
+    state.className = "state-cell";
+    row.append(cell("Job ID", inspect), cell("Capability", node("span", string(job.capability) || "Unknown")),
+      cell("Worker", node("span", string(job.worker_id) || "Unknown")), state, cell("Elapsed", duration), digestCell);
+    return row;
+  }
+
+  function renderJobs() {
+    const { filters, history, historyRows, inventory } = session;
+    const filtered = Boolean(filters.state || filters.capability || filters.worker_id || filters.limit !== 50);
+    const ready = Boolean(bearer && session.connected && history !== "unsupported");
+    $("apply-filters").disabled = !ready;
+    $("clear-filters").disabled = !ready;
+    put("job-scope", inventory === "admin" ? "Fleet jobs" : inventory === "scoped" ? "Your jobs" : "");
+    let message;
+    if (!bearer) message = lockedText;
+    else if (history === "unsupported" || (!session.connected && session.sources.get("discover")?.failed)) message = "Job history unavailable";
+    else if (session.sources.get("table")?.failed) message = dated("table");
+    else if (!historyRows) message = "Loading jobs…";
+    else if (!historyRows.length) message = filtered ? "No matching jobs" : "No jobs yet";
+    else message = historyRows.length + " shown · limit " + filters.limit;
+    put("jobs-message", message);
+    $("job-table").hidden = !historyRows?.length;
+    const rows = document.createDocumentFragment();
+    for (const job of array(historyRows)) {
+      if (job && typeof job === "object") rows.append(jobRow(job));
+    }
+    const body = $("job-rows");
+    const selection = getSelection();
+    if (!bearer || !selection?.toString() || !body.contains(selection.anchorNode)) {
+      replaceRegion(body, rows, $("jobs-heading"));
+    }
+  }
+
+  function renderFilterOptions() {
+    $("filter-capabilities").replaceChildren(...[...session.offers.keys()].sort().map((value) => option(value)));
+    $("filter-workers").replaceChildren(...[...session.workers.keys()].sort().filter(
+      (value) => !hasBearer(value)
+    ).map((value) => option(value)));
+  }
+
+  function applyFilters() {
+    if (!bearer || session.history === "unsupported" || !$("filters").reportValidity()) return;
+    const filters = {
+      state: $("filter-state").value, capability: $("filter-capability").value,
+      worker_id: $("filter-worker").value, limit: Number($("filter-limit").value)
+    };
+    if (Object.values(filters).some(hasBearer)) {
+      put("jobs-message", "Remove the credential from the filters");
+      return;
+    }
+    session.filters = filters;
+    session.filterVersion += 1;
+    session.historyRows = null;
+    session.sources.delete("table");
+    const selection = getSelection();
+    if (selection && $("job-rows").contains(selection.anchorNode)) selection.removeAllRanges();
+    $("table-copy").replaceChildren();
+    renderJobs();
+    readHistory(session, "table", filters);
+  }
+
+  function selectOffer(capability, pin) {
+    if (!session.offers.has(capability)) return;
+    draft.capability = capability;
+    draft.pin = pin && offersPin(session.offers.get(capability), pin) ? pin : "";
+    editDraft();
+    $("input").focus();
+  }
+
+  function editDraft() {
+    if (draft.sent) {
+      draft.key = randomKey();
+      draft.sent = false;
+    }
+    $("input-error").textContent = "";
+    renderDraft();
+  }
+
+  function renderDraft() {
+    const capabilities = [...session.offers.keys()].sort();
+    setOptions($("capability"), [["", "Select capability"], ...capabilities.map((name) => [name, name])],
+      draft.capability, draft.capability + " (unavailable)");
+    const offers = session.offers.get(draft.capability) || [];
+    const choices = gpuChoices(offers);
+    setOptions($("gpu"), [["", "Auto-select"], ...[...choices.entries()].sort().map(([uuid, name]) =>
+      [uuid, name ? name + " · " + uuid : uuid]
+    )], draft.pin, draft.pin + " (unavailable)");
+    const kinds = [...new Set(offers.map((offer) => string(offer.kind)).filter(Boolean))];
+    const descriptions = [...new Set(offers.map((offer) => string(offer.description)).filter(Boolean))];
+    const profiles = draft.pin ? offers.filter((offer) => offersPin([offer], draft.pin)) : offers;
+    const budgets = profiles.map((offer) => offer.timeout_secs).filter((value) => Number.isInteger(value) && value > 0);
+    const minimum = Math.min(...budgets);
+    const maximum = Math.max(...budgets);
+    const budget = minimum === maximum ? minimum + "s" : minimum + " to " + maximum + "s";
+    const eligible = Boolean(offers.length && (!draft.pin || offersPin(offers, draft.pin)));
+    const description = !bearer ? "Connect to discover capabilities." :
+      !session.connected && session.sources.get("discover")?.failed ? "Discovery unavailable." : !draft.capability ?
+      "Choose a capability." : !offers.length ? "This capability is no longer in discovery." :
+      [...kinds, ...descriptions].join(" · ");
+    put("offer-description", description);
+    put("profile-timeout", draft.pin && !eligible ? "The pinned GPU is not advertised for this capability." :
+      budgets.length ? "Profile budget · " + budget + ". Explicit timeouts are capped by the matched worker." : "");
+    put("key", draft.key || "Connect to generate a key");
+    $("regenerate").disabled = !bearer || session.pending;
+    $("submit").disabled = !bearer || !eligible || session.pending || (attempt?.unknown && attempt.key === draft.key);
+    $("retry").hidden = !attempt?.unknown;
+    $("retry").disabled = session.pending;
+  }
+
+  async function chooseStarter(template) {
+    const context = session;
+    const input = $("input");
+    const value = JSON.stringify(template, null, 2);
+    if (input.value !== "{}" && input.value !== value) {
+      const replace = await runConfirmation("Replace input?", "The selected starter will replace your edited JSON.", "Replace", "Keep");
+      if (!replace || !current(context)) return;
+    }
+    input.value = value;
+    editDraft();
+    input.focus();
+  }
+
+  async function regenerateKey() {
+    const context = session;
+    if (!bearer || context.pending) return;
+    if (attempt?.unknown && !await runConfirmation("Start a new job?", "The earlier submission may already be running. A new key can start another job.", "Use new key")) return;
+    if (!current(context)) return;
+    attempt = null;
+    draft.key = randomKey();
+    draft.sent = false;
+    put("submit-message", "");
+    renderDraft();
+  }
+
+  function includesBearer(value) {
+    if (typeof value === "string") return hasBearer(value);
+    if (value !== null && typeof value === "object") {
+      return Object.entries(value).some(([key, entry]) => hasBearer(key) || includesBearer(entry));
+    }
+    return false;
+  }
+
+  async function submitDraft() {
+    const context = session;
+    if ($("submit").disabled) return;
+    let input;
+    try {
+      input = JSON.parse($("input").value);
+      if (includesBearer(input)) throw new Error("Remove the active bearer token from the input");
+      put("input-error", "");
+    } catch (error) {
+      put("input-error", error.message);
+      $("input").focus();
+      return;
+    }
+    const timeout = $("timeout");
+    if (!timeout.reportValidity()) return;
+    const envelope = { capability: draft.capability, input, async: $("async").checked };
+    if (draft.pin) envelope.pin_gpu_uuid = draft.pin;
+    if (timeout.value !== "") envelope.timeout_secs = Number(timeout.value);
+    const frozen = { key: draft.key, bytes: JSON.stringify(envelope), start: Date.now(), unknown: false };
+    if (attempt?.unknown && !await runConfirmation("Start a new job?", "The earlier submission may already be running. A new key can start another job.", "Submit new job")) return;
+    if (!current(context) || draft.key !== frozen.key || context.pending) return;
+    draft.sent = true;
+    sendAttempt(frozen);
+  }
+
+  async function sendAttempt(frozen) {
+    const context = session;
+    if (!bearer || context.pending) return;
+    context.pending = true;
+    attempt = frozen;
+    closeViewer();
+    put("submit-message", "Submitting…");
+    renderDraft();
+    let response;
+    try {
+      response = await request(context, fleetUrl(paths.jobs), { method: "POST", body: frozen.bytes, key: frozen.key });
+    } catch { /* Without a receipt the outcome can be ambiguous. */ }
+    if (!current(context)) return;
+    context.pending = false;
+    const id = string(response?.body?.job_id);
+    frozen.unknown = !id && (!response || response.ok || response.status >= 500);
+    if (frozen.unknown) put("submit-message", "Submission outcome unknown" + (response ? " · HTTP " + response.status : ""));
+    else if (!response.ok) {
+      const code = readError(response);
+      const reason = string(response.body?.error?.message);
+      put("submit-message", ["HTTP " + response.status, code, reason].filter(Boolean).join(" · "));
+      if (code === "capacity_exhausted") refresh(false);
+      if (code === "capability_unavailable") {
+        const refreshLink = button("Refresh discovery", () => { if (current(context)) refresh(true); });
+        $("submit-message").append(" ", refreshLink);
+      }
+    } else put("submit-message", "Job receipt received");
+    if (response) {
+      viewer = {
+        id: id && !hasBearer(id) ? id : "", response, started: frozen.start, receipt: response.body,
+        watching: Boolean(id), readStatus: ""
+      };
+      renderViewer();
+      if (viewer.id) subscribe(viewer.id, "viewer", response.body);
+    }
+    renderDraft();
+  }
+
+  function display(value) {
+    return (typeof value === "string" && value !== "") || finite(value) || typeof value === "boolean" ? String(value) : "Unknown";
+  }
+
+  function absolute(ms) {
+    if (!finite(ms)) return "Unknown";
+    const date = new Date(ms);
+    return Number.isNaN(date.valueOf()) ? "Unknown" : date.toISOString();
+  }
+
+  function metadata(container, entries) {
+    const list = node("dl");
+    for (const [label, value] of entries) {
+      const details = node("dd", undefined, "mono");
+      details.append(value instanceof Node ? value : node("span", display(value)));
+      list.append(node("dt", label), details);
+    }
+    container.replaceChildren(list);
+  }
+
+  function renderViewer() {
+    $("viewer").hidden = !viewer;
+    if (!viewer) {
+      $("submission-fields").replaceChildren();
+      $("submission-response").querySelector("pre").textContent = "";
+      $("watch-message").textContent = "";
+      return;
+    }
+    const { id, response, receipt, started, watching, readStatus } = viewer;
+    const row = receipt || {};
+    const duration = finite(row.created_at_ms) ? receiptElapsed(row) : elapsed(response.date - started);
+    metadata($("submission-fields"), [
+      ["HTTP status", response.status], ["State", stateBadge(row.state)], ["Job ID", id || "Unavailable"],
+      ["Replay", response.body?.idempotent_replay === true ? "Yes" : response.body?.idempotent_replay === false ? "No" : "Unknown"],
+      ["Worker", row.worker_id], ["GPU", row.gpu_uuid], ["Elapsed", duration],
+      ["Capacity released", row.capacity_released === true ? "Yes" : row.capacity_released === false ? "No" : "Unknown"]
+    ]);
+    const liveDuration = $("submission-fields").querySelectorAll("dd")[6];
+    if (row.state === "running") liveDuration.dataset.created = String(finite(row.created_at_ms) ? row.created_at_ms : started);
+    $("open-receipt").hidden = !id;
+    $("watch").hidden = !id || row.state !== "running" || viewer.accessLost === true;
+    put("watch", watching ? "Stop watching" : "Resume watching");
+    put("watch-message", readStatus);
+    $("submission-response").querySelector("pre").textContent = pretty(response.body);
+  }
+
+  function closeViewer() {
+    if (viewer?.id) unsubscribe(viewer.id, "viewer");
+    viewer = null;
+    renderViewer();
+  }
+
+  function stopDetail(watch) {
+    clearTimeout(watch.timer);
+    watch.timer = 0;
+    watch.abort?.abort();
+  }
+
+  function wantsInput(watch) {
+    return watch.subscribers.has("inspector");
+  }
+
+  function subscribe(id, reader, initial) {
+    let watch = session.watches.get(id);
+    if (!watch) {
+      watch = { subscribers: new Set(), receipt: initial, delay: 2000, timer: 0, inFlight: false };
+      session.watches.set(id, watch);
+    }
+    watch.subscribers.add(reader);
+    if (watch.loaded && reader === "inspector" && watch.receipt) renderDetail(watch.receipt);
+    if (watch.inFlight) return;
+    clearTimeout(watch.timer);
+    watch.timer = 0;
+    fetchDetail(session, id, watch);
+  }
+
+  function unsubscribe(id, reader) {
+    const watch = session.watches.get(id);
+    if (!watch) return;
+    watch.subscribers.delete(reader);
+    if (!watch.subscribers.size) {
+      stopDetail(watch);
+      session.watches.delete(id);
+    } else if (reader === "inspector" && watch.receipt && Object.hasOwn(watch.receipt, "input")) {
+      delete watch.receipt.input;
+    }
+  }
+
+  function rescheduleDetail(context, id, watch) {
+    clearTimeout(watch.timer);
+    watch.timer = 0;
+    if (!current(context) || !watch.subscribers.size || watch.accessLost || document.hidden ||
+        (watch.loaded && watch.receipt?.state !== "running" && !watch.retry)) return;
+    watch.timer = setTimeout(() => {
+      watch.delay = Math.min(10000, Math.ceil(watch.delay * 1.6));
+      fetchDetail(context, id, watch);
+    }, watch.delay);
+  }
+
+  async function fetchDetail(context, id, watch) {
+    if (!current(context) || !watch.subscribers.size || watch.inFlight || document.hidden) return;
+    watch.inFlight = true;
+    const includeInput = wantsInput(watch);
+    const controller = new AbortController();
+    watch.abort = controller;
+    const abort = () => controller.abort();
+    context.controller.signal.addEventListener("abort", abort, { once: true });
+    let response;
+    try {
+      const query = includeInput ? new URLSearchParams({ include_input: "true" }) : undefined;
+      response = await request(context, fleetUrl(paths.jobs, "/" + idPath(id), query), { signal: controller.signal });
+    } catch { /* a lost read leaves the last receipt in place */ }
+    context.controller.signal.removeEventListener("abort", abort);
+    watch.inFlight = false;
+    watch.abort = null;
+    if (!current(context) || context.watches.get(id) !== watch) return;
+    const matching = response?.ok && response.body?.job_id === id;
+    if (matching) {
+      watch.loaded = true;
+      watch.receipt = response.body;
+      if (!wantsInput(watch)) delete watch.receipt.input;
+    }
+    watch.accessLost = [401, 403, 404].includes(response?.status);
+    watch.retry = !matching && !watch.accessLost;
+    const status = matching ? "" : watch.accessLost ? "Receipt unavailable · HTTP " + response.status :
+      "Receipt read unavailable" + (watch.loaded ? " · showing last read" : "");
+    if (watch.accessLost) {
+      watch.receipt = null;
+      watch.loaded = false;
+    }
+    if (watch.subscribers.has("inspector") && inspector?.id === id) {
+      if (watch.accessLost) clearDetail();
+      if (matching) renderDetail(watch.receipt);
+      put("detail-message", status);
+    }
+    if (watch.subscribers.has("viewer") && viewer?.id === id) {
+      if (matching) {
+        const { input, ...summary } = watch.receipt;
+        viewer.receipt = summary;
+      }
+      if (watch.accessLost) {
+        viewer.receipt = { job_id: id, state: viewer.receipt?.state };
+        viewer.response = { ...viewer.response, body: null };
+      }
+      viewer.accessLost = watch.accessLost;
+      viewer.readStatus = status;
+      renderViewer();
+    }
+    if (!includeInput && wantsInput(watch) && !watch.accessLost) fetchDetail(context, id, watch);
+    else rescheduleDetail(context, id, watch);
+  }
+
+  function showJson(id, value, absentMessage) {
+    const panel = $(id);
+    const text = value === undefined ? absentMessage : pretty(value);
+    const lines = panel.querySelector("pre");
+    const expand = panel.querySelector("button");
+    const bytes = new TextEncoder().encode(text);
+    const large = bytes.length > 16 * 1024;
+    const expanded = inspector?.expanded.has(id);
+    if (large && !expanded) {
+      lines.textContent = new TextDecoder().decode(bytes.subarray(0, 16 * 1024)) + "\n…";
+    } else lines.textContent = text;
+    expand.hidden = !large || expanded;
+    expand.onclick = () => {
+      if (!inspector) return;
+      inspector.expanded.add(id);
+      showJson(id, value, absentMessage);
+    };
+    if (!large && !panel.dataset.initialized) panel.open = true;
+    panel.dataset.initialized = "true";
+  }
+
+  function clearDetail() {
+    $("detail-fields").replaceChildren();
+    $("detail-copy").replaceChildren();
+    for (const id of ["detail-input", "detail-output", "detail-error"]) {
+      const panel = $(id);
+      panel.open = false;
+      delete panel.dataset.initialized;
+      panel.querySelector("pre").textContent = "";
+      const expand = panel.querySelector("button");
+      expand.hidden = true;
+      expand.onclick = null;
+    }
+    put("detail-message", "");
+  }
+
+  function renderDetail(row) {
+    if (inspector?.id !== row.job_id) return;
+    const digest = digestOf(row.output_sha256);
+    const value = node("span", digest || "Unavailable");
+    if (digest) value.append(" ", copyButton("Copy SHA-256", () => copyValue(digest, "SHA-256 digest", $("detail-copy")), "copy-detail"));
+    const active = $("detail-fields").contains(document.activeElement) && document.activeElement.dataset.focusKey;
+    metadata($("detail-fields"), [
+      ["Job ID", row.job_id], ["State", stateBadge(row.state)], ["Actor", row.actor], ["Project", row.project],
+      ["Capability", row.capability], ["Worker", row.worker_id], ["Assigned GPU", row.gpu_uuid || "None recorded"],
+      ["Created", absolute(row.created_at_ms)], ["Updated", absolute(row.updated_at_ms)],
+      ["Capacity released", row.capacity_released === true ? "Yes" : row.capacity_released === false ? "No" : "Unknown"],
+      ["Output SHA-256", value]
+    ]);
+    if (active) ($("detail-fields").querySelector("[data-focus-key]") || $("close-inspector")).focus({ preventScroll: true });
+    showJson("detail-input", row.input, "Not returned by this controller");
+    showJson("detail-output", row.output, "Not returned by this controller");
+    showJson("detail-error", row.error_code ? { error_code: row.error_code } : undefined, "No recorded error");
+  }
+
+  function openInspector(id, opener) {
+    try { idPath(id); } catch { return; }
+    if (!bearer || $("inspector").open) return;
+    inspector = { id, opener, expanded: new Set() };
+    clearDetail();
+    put("detail-message", "Loading receipt…");
+    $("inspector").showModal();
+    subscribe(id, "inspector");
+  }
+
+  function closeInspector() {
+    if (!inspector || $("inspector").open) return;
+    const { id, opener } = inspector;
+    inspector = null;
+    unsubscribe(id, "inspector");
+    clearDetail();
+    const replacement = Array.from($("job-rows").querySelectorAll("[data-focus-key]")).find(
+      (entry) => entry.dataset.focusKey === mask("job:" + id)
+    );
+    (opener?.isConnected ? opener : replacement || $("jobs-heading")).focus({ preventScroll: true });
+  }
+
+  function renderTools() {
+    const fragment = document.createDocumentFragment();
+    const tools = session.tools;
+    put("mcp-message", !bearer ? (lockedText === "Fleet closed" ? lockedText : "Connect to load the tool catalog.") :
+      session.sources.get("tools")?.failed ? dated("tools") : tools ? tools.length + " tools advertised" :
+      !session.connected && session.sources.get("discover")?.failed ? "Tool catalog unavailable" : "Loading tool catalog…");
+    if (tools) {
+      const byName = new Map(tools.filter((tool) => string(tool?.name)).map((tool) => [tool.name, tool]));
+      for (const name of new Set([...byName.keys(), ...expectedTools.keys()])) {
+        const tool = byName.get(name);
+        const access = expectedTools.get(name) || "Access unspecified";
+        const details = node("details");
+        details.dataset.focusKey = mask("tool:" + name);
+        const summary = node("summary");
+        summary.dataset.focusKey = details.dataset.focusKey;
+        summary.append(node("code", name), node("span", " · " + access, "note"));
+        if (!tool) {
+          const entry = node("div", undefined, "field");
+          entry.append(...summary.childNodes, node("span", "Unavailable on this controller", "note"));
+          fragment.append(entry);
+          continue;
+        }
+        details.append(summary);
+        if (string(tool.description)) details.append(node("p", tool.description, "note"));
+        details.append(node("pre", tool.inputSchema === undefined ? "No input schema advertised" : pretty(tool.inputSchema)));
+        fragment.append(details);
+      }
+    }
+    replaceRegion($("tools"), fragment);
+  }
+
+  function renderSnapshot() {
+    renderFleet();
+    renderJobs();
+    renderCounts();
+    renderDraft();
+    renderFilterOptions();
+    renderTools();
+  }
+
+  function tick() {
+    if (document.hidden) return;
+    renderConnection();
+    put("worker-age", dated("workers"));
+    for (const item of document.querySelectorAll("[data-seen]")) {
+      item.textContent = "Last seen " + age(Number(item.dataset.seen)) + " ago";
+    }
+    for (const item of document.querySelectorAll("[data-created]")) item.textContent = age(Number(item.dataset.created));
+  }
+
+  function shellQuote(value) {
+    return "'" + value.replace(/'/g, "'\"'\"'") + "'";
+  }
+
+  const sampleTools = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const sampleCall = JSON.stringify({
+    jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "fleet_discover", arguments: {} }
+  });
+  function curl(endpoint, body) {
+    const lines = ["curl -sS " + shellQuote(endpoint)];
+    if (body) lines.push("  -H 'Content-Type: application/json'", "  --data-binary " + shellQuote(body));
+    lines.push("  -H @- <<'HEADERS'");
+    return lines.join(" " + String.fromCharCode(92) + "\n") + "\nAuthorization: Bearer <TOKEN>\nHEADERS";
+  }
+  put("mcp-endpoint", paths.mcp);
+  for (const [id, label, value] of [
+    ["copy-endpoint", "MCP endpoint", paths.mcp],
+    ["copy-discover", "Discovery curl", curl(paths.discover)],
+    ["copy-tools", "MCP tools curl", curl(paths.mcp, sampleTools)],
+    ["copy-call", "MCP call", sampleCall]
+  ]) $(id).addEventListener("click", () => {
+    // The examples are fixed. Only the endpoint is resolved at runtime.
+    if (!hasBearer(decodeURIComponent(new URL(paths.mcp).pathname))) {
+      copyValue(value, label, $("integration-copy"), true);
+    }
+  });
+
+  $("token").addEventListener("click", () => {
+    $("bearer").value = "";
+    $("bearer").required = !bearer;
+    $("bearer").placeholder = bearer ? "Leave blank to keep the current bearer" : "";
+    $("remember").checked = Boolean(bearer && storage("read") === bearer);
+    put("token-error", "");
+    $("token-dialog").showModal();
+    $("bearer").focus();
+  });
+  $("token-close").addEventListener("click", () => $("token-dialog").close());
+  $("token-dialog").addEventListener("close", () => {
+    $("bearer").value = "";
+    $("token").focus({ preventScroll: true });
+  });
+  $("token-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = $("bearer").value.trim() || bearer;
+    if (!/^[!-~]+$/.test(value)) {
+      put("token-error", "Enter a printable bearer without whitespace");
+      $("bearer").focus();
+      return;
+    }
+    const remember = $("remember").checked;
+    const stored = value === bearer ? storage(remember ? "write" : "remove", value) :
+      replaceCredential(value, remember);
+    $("token-dialog").close();
+    if (!stored) announce("Session storage is unavailable. The bearer is held in page memory.");
+  });
+  function lock() {
+    replaceCredential("", false);
+    if ($("token-dialog").open) $("token-dialog").close();
+    $("token").focus({ preventScroll: true });
+    announce("Locked");
+  }
+  $("clear-token").addEventListener("click", lock);
+  $("lock").addEventListener("click", lock);
+  $("refresh").addEventListener("click", () => refresh(true));
+  $("auto").addEventListener("change", scheduleRefresh);
+  $("confirm-dialog").addEventListener("close", () => {
+    const pending = confirming;
+    confirming = null;
+    if (!pending) return;
+    const { opener, resolve } = pending;
+    if (bearer && !opener?.isConnected && opener?.dataset.focusKey) {
+      Array.from(document.querySelectorAll("[data-focus-key]")).find(
+        (entry) => entry.dataset.focusKey === opener.dataset.focusKey
+      )?.focus({ preventScroll: true });
+    }
+    resolve($("confirm-dialog").returnValue === "confirm");
+  });
+
+  $("filters").addEventListener("submit", (event) => {
+    event.preventDefault();
+    applyFilters();
+  });
+  $("clear-filters").addEventListener("click", () => {
+    $("filters").reset();
+    applyFilters();
+  });
+  $("active-jobs").addEventListener("click", () => {
+    if (!bearer) return;
+    $("filters").reset();
+    $("filter-state").value = "running";
+    applyFilters();
+  });
+  $("capability").addEventListener("change", () => {
+    draft.capability = $("capability").value;
+    draft.pin = "";
+    editDraft();
+  });
+  $("gpu").addEventListener("change", () => {
+    draft.pin = $("gpu").value;
+    editDraft();
+  });
+  for (const id of ["timeout", "input"]) $(id).addEventListener("input", editDraft);
+  for (const input of document.querySelectorAll('input[name="execution"]')) input.addEventListener("change", editDraft);
+  for (const trigger of document.querySelectorAll("[data-starter]")) {
+    trigger.addEventListener("click", () => chooseStarter(starters[trigger.dataset.starter]));
+  }
+  $("regenerate").addEventListener("click", regenerateKey);
+  $("draft").addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitDraft();
+  });
+  $("retry").addEventListener("click", () => { if (attempt?.unknown) sendAttempt(attempt); });
+  $("close-inspector").addEventListener("click", () => $("inspector").close());
+  $("inspector").addEventListener("close", closeInspector);
+  $("open-receipt").addEventListener("click", () => {
+    if (viewer?.id) openInspector(viewer.id, $("open-receipt"));
+  });
+  $("close-viewer").addEventListener("click", () => {
+    closeViewer();
+    ($("submit").disabled ? $("capability") : $("submit")).focus({ preventScroll: true });
+  });
+  $("watch").addEventListener("click", () => {
+    if (!viewer?.id) return;
+    viewer.watching = !viewer.watching;
+    if (viewer.watching) {
+      viewer.readStatus = "";
+      subscribe(viewer.id, "viewer", viewer.receipt);
+    } else {
+      viewer.readStatus = "Watching paused";
+      unsubscribe(viewer.id, "viewer");
+    }
+    renderViewer();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(autoTimer);
+    if (document.hidden) {
+      for (const watch of session.watches.values()) {
+        clearTimeout(watch.timer);
+        watch.timer = 0;
+      }
+    } else if (bearer && !suspended) {
+      if (Number($("auto").value)) refresh(false);
+      for (const [id, watch] of session.watches) {
+        if ((!watch.loaded || watch.retry || watch.receipt?.state === "running") && !watch.accessLost) fetchDetail(session, id, watch);
+      }
+    }
+  });
+  window.addEventListener("pagehide", (event) => {
+    if (event.persisted) {
+      suspended = true;
+      replaceCredential(bearer, null);
+    }
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && suspended) {
+      suspended = false;
+      if (bearer) refresh(true);
+    }
+  });
+  setInterval(tick, 1000);
+  const remembered = storage("read");
+  if (/^[!-~]+$/.test(remembered)) replaceCredential(remembered, null);
+  else renderSnapshot();
+})();
+</script>
+</body>
+</html>
