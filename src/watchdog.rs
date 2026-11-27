@@ -442,7 +442,10 @@ impl Watchdog {
                 backlog["jobs"][index]["status"] = serde_json::json!("dispatched");
                 backlog["jobs"][index]["dispatched_at"] = serde_json::json!(ts);
                 if inputs
-                    .replace("backlog.json", &serde_json::to_vec_pretty(&backlog).unwrap())
+                    .replace(
+                        "backlog.json",
+                        &serde_json::to_vec_pretty(&backlog).unwrap(),
+                    )
                     .is_err()
                 {
                     self.dispatched.insert(found.job.clone());
@@ -543,7 +546,12 @@ pub(crate) async fn run(app: super::App) {
         let now = cfg["clock_file"]
             .as_str()
             .zip(cfg["directory"].as_str())
-            .and_then(|(clock, root)| PrivateDir::open(Path::new(root)).ok()?.read(Path::new(clock)).ok())
+            .and_then(|(clock, root)| {
+                PrivateDir::open(Path::new(root))
+                    .ok()?
+                    .read(Path::new(clock))
+                    .ok()
+            })
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or_else(|| (app.clock)());
@@ -680,12 +688,18 @@ mod tests {
             let calls = std::sync::atomic::AtomicUsize::new(0);
             f.state(1000);
             Watchdog::default()
-                .tick_with(&f.app, 1000, vec![f.worker.clone()], None, |_, lane, body| {
-                    assert_eq!(lane, "render-blender");
-                    assert_eq!(&body[..], b"{}");
-                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    async { axum::http::StatusCode::CREATED.into_response() }
-                })
+                .tick_with(
+                    &f.app,
+                    1000,
+                    vec![f.worker.clone()],
+                    None,
+                    |_, lane, body| {
+                        assert_eq!(lane, "render-blender");
+                        assert_eq!(&body[..], b"{}");
+                        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        async { axum::http::StatusCode::CREATED.into_response() }
+                    },
+                )
                 .await;
             assert_eq!(calls.into_inner(), usize::from(allowed), "{case}");
             if matches!(case, "absolute" | "relative") {
@@ -1031,7 +1045,8 @@ mod tests {
                 json!({"jobs":[{
                     "job":"job-1", "card":"local-2070", "lane":"render-blender",
                     "status":"ready", "args":[f.root.join("spec.json")]
-                }]}).to_string(),
+                }]})
+                .to_string(),
             );
             let mut state: Value = serde_json::from_slice(include_bytes!(
                 "../tests/fixtures/card-state/local-2070.json"

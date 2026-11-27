@@ -1,5 +1,5 @@
 //! Shared controller log and event redaction using the vendored sanitizer.
-#[path = "../third_party/codex/codex-rs/secrets/src/sanitizer.rs"]
+#[path = "../third_party/codex/codex-rs/log-redaction/src/sanitizer.rs"]
 mod sanitizer;
 
 pub fn line(input: &str) -> String {

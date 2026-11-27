@@ -642,10 +642,7 @@ mod tests {
     fn freshness_boundary() {
         let (dir, v) = fixture();
         let epoch = v["epoch"].as_u64().unwrap();
-        assert_eq!(
-            refresh(&dir, epoch + 179)["local-2070"]["stale"],
-            false
-        );
+        assert_eq!(refresh(&dir, epoch + 179)["local-2070"]["stale"], false);
         let stale = &refresh(&dir, epoch + 181)["local-2070"];
         assert_eq!(stale["stale"], true);
         assert_eq!(stale["util"], "unknown");

@@ -66,7 +66,7 @@ Drain and enroll both require the fleet admin bearer. In the worker config that 
 ```bash
 mkdir -p /home/operator/.config/diffuser /home/operator/.local/state/diffuser
 cp config.example.json /home/operator/.config/diffuser/gamer-idle.json
-install -m 600 /dev/null /home/operator/.config/diffuser/fleet.token
+install -m 600 /dev/null example-admin-token.txt
 # Write the fleet admin bearer into fleet.token. One line, no quotes.
 ```
 

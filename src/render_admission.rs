@@ -100,9 +100,7 @@ pub fn body(spec: &Value) -> Result<(), &'static str> {
     let out = spec["out"]
         .as_str()
         .ok_or_else(|| crate::error_catalog::reason(crate::error_catalog::BAD_SPEC))?;
-    if !out.starts_with('/')
-        || out == "/mnt/gpu-preserve"
-        || out.starts_with("/mnt/gpu-preserve/")
+    if !out.starts_with('/') || out == "/mnt/gpu-preserve" || out.starts_with("/mnt/gpu-preserve/")
     {
         return Err(crate::error_catalog::reason(crate::error_catalog::BAD_SPEC));
     }

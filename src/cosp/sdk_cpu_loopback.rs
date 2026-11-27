@@ -281,7 +281,11 @@ async fn sdk_cpu_lifecycle_over_private_loopback() {
         [accepted.job_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
     assert_eq!(
         (worker_state.as_str(), worker_digest.as_str(), worker_bytes),
-        ("complete", digest.as_str(), i64::try_from(disk.bytes).unwrap())
+        (
+            "complete",
+            digest.as_str(),
+            i64::try_from(disk.bytes).unwrap()
+        )
     );
     let worker_close: i64 = worker_db
         .query_row("SELECT COUNT(*) FROM worker_close_receipts", [], |r| {

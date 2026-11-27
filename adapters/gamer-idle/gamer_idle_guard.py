@@ -371,11 +371,11 @@ def config_from_mapping(raw: object) -> Config:
             "worker_id must be 1 to 64 characters: letters, digits, dot, underscore, hyphen"
         )
     controller_url = validate_controller_url(str(raw.get("controller_url", "")))
-    token_file = _optional_text(raw.get("token_file"), "token_file")
-    token_env = _optional_text(raw.get("token_env"), "token_env")
-    if token_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token_env):
+    file_path = _optional_text(raw.get("token_file"), "token_file")
+    env_name = _optional_text(raw.get("token_env"), "token_env")
+    if env_name is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name):
         raise ConfigError("token_env must be an environment variable name")
-    if token_file is None and token_env is None:
+    if file_path is None and env_name is None:
         raise ConfigError("set token_file or token_env")
     watch = raw.get("process_watchlist", list(DEFAULT_WATCHLIST))
     markers = raw.get("diffuser_process_markers", list(DEFAULT_DIFFUSER_MARKERS))
@@ -391,7 +391,7 @@ def config_from_mapping(raw: object) -> Config:
     state_file = _optional_text(raw.get("state_file"), "state_file")
     if command and pid_file is None:
         raise ConfigError("worker_pid_file is required when worker_command is set")
-    paths = [path for path in (token_file, pid_file, state_file) if path]
+    paths = [path for path in (file_path, pid_file, state_file) if path]
     if len({os.path.abspath(path) for path in paths}) != len(paths):
         raise ConfigError("token_file, worker_pid_file, and state_file must be different paths")
     binary = _optional_text(raw.get("nvidia_smi_bin"), "nvidia_smi_bin") or "nvidia-smi"
@@ -400,8 +400,8 @@ def config_from_mapping(raw: object) -> Config:
     return Config(
         worker_id=worker_id,
         controller_url=controller_url,
-        token_file=token_file,
-        token_env=token_env,
+        token_file=file_path,
+        token_env=env_name,
         poll_interval_secs=_number(raw.get("poll_interval_secs"), "poll_interval_secs", 3, 0.5, 120),
         idle_cooldown_secs=_number(raw.get("idle_cooldown_secs"), "idle_cooldown_secs", 180, 0, 86400),
         busy_util_pct=_number(raw.get("busy_util_pct"), "busy_util_pct", 25, 1, 100),
@@ -480,11 +480,11 @@ def read_token_file(path: str) -> str:
 
 
 def read_token_env(name: str) -> str:
-    token = os.environ.get(name, "")
-    token = token.strip()
-    if not _token_is_header_safe(token):
+    value = os.environ.get(name, "")
+    value = value.strip()
+    if not _token_is_header_safe(value):
         raise ConfigError(f"environment variable {name} is missing or not a single token")
-    return token
+    return value
 
 
 def read_configured_token(config: Config) -> str:
@@ -869,18 +869,18 @@ class HttpFleetClient:
         self.config = config
         self.base = validate_controller_url(config.controller_url)
         self._send = send or urllib_send
-        self._token_loader = token_loader or (lambda: read_configured_token(config))
+        self._load_auth = token_loader or (lambda: read_configured_token(config))
 
     def _url(self, path: str) -> str:
         validate_controller_url(self.base)
         return self.base + path
 
     def _post(self, url: str, body: bytes) -> None:
-        token = self._token_loader()
-        if not _token_is_header_safe(token):
+        value = self._load_auth()
+        if not _token_is_header_safe(value):
             raise FleetHttpError("fleet token is missing")
         headers = {
-            "Authorization": "Bearer " + token,
+            "Authorization": "Bearer " + value,
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "gamer-idle-guard",

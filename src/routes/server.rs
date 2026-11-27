@@ -1,7 +1,7 @@
 use crate::*;
 pub(crate) fn bind_ok(addr: &SocketAddr) -> bool {
     match addr.ip() {
-        IpAddr::V4(v) => v.is_loopback() || v.octets()[0] == 10, // loopback, or the 10.0.0.0/24 private LAN / tunnel ends
+        IpAddr::V4(v) => v.is_loopback() || v.octets()[0] == 10, // loopback, or the private 10/8 LAN or tunnel addresses
         IpAddr::V6(v) => v.is_loopback(),
     }
 }

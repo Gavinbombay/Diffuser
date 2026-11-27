@@ -294,7 +294,13 @@ fn attach_local_service_witness(
     role_root: &File,
     custody_root: &File,
     keys: &ChannelKeys,
-) -> Result<(Arc<state_custody::Session>, Arc<Mutex<state_custody::Ledger>>), String> {
+) -> Result<
+    (
+        Arc<state_custody::Session>,
+        Arc<Mutex<state_custody::Ledger>>,
+    ),
+    String,
+> {
     let ledger = Arc::new(Mutex::new(
         state_custody::Ledger::new(custody_root, binding.clone(), keys)
             .map_err(|e| format!("service_ledger:{e}"))?,
@@ -325,8 +331,8 @@ fn attach_local_service_witness(
     )
     .map_err(|e| format!("service_link:{e}"))?;
     *slot.lock().unwrap() = Some(Arc::downgrade(&link));
-    let session =
-        state_custody::Session::create(role_root, link).map_err(|e| format!("service_session:{e}"))?;
+    let session = state_custody::Session::create(role_root, link)
+        .map_err(|e| format!("service_session:{e}"))?;
     Ok((session, ledger))
 }
 
@@ -486,10 +492,8 @@ pub(super) fn bootstrap_controller(
     let p_path = state_dir.join("protected-custody");
     fs::create_dir_all(&c_path).map_err(|e| format!("mkdir_controller:{e}"))?;
     fs::create_dir_all(&p_path).map_err(|e| format!("mkdir_custody:{e}"))?;
-    let c_root =
-        la_artifacts::open_owned_root(&c_path).map_err(|e| format!("open_c_root:{e}"))?;
-    let p_root =
-        la_artifacts::open_owned_root(&p_path).map_err(|e| format!("open_p_root:{e}"))?;
+    let c_root = la_artifacts::open_owned_root(&c_path).map_err(|e| format!("open_c_root:{e}"))?;
+    let p_root = la_artifacts::open_owned_root(&p_path).map_err(|e| format!("open_p_root:{e}"))?;
 
     let now = wall_now_ms()?;
     let mut grants = Vec::with_capacity(cfg.grants.len());
@@ -535,9 +539,13 @@ pub(super) fn bootstrap_controller(
             .map_err(|e| format!("claim_store:{e}"))?,
     ));
 
-    let mut channel =
-        TransportJournal::create(&c_root, &c_path, "controller-channel.sqlite", binding.clone())
-            .map_err(|e| format!("transport_journal:{e}"))?;
+    let mut channel = TransportJournal::create(
+        &c_root,
+        &c_path,
+        "controller-channel.sqlite",
+        binding.clone(),
+    )
+    .map_err(|e| format!("transport_journal:{e}"))?;
     attach_local_transport_witness(
         &mut channel,
         &binding,
@@ -712,10 +720,8 @@ fn run_worker_inner(config_path: &Path, bind: &str, state_dir: &Path) -> Result<
     let p_path = state_dir.join("protected-worker-custody");
     fs::create_dir_all(&w_path).map_err(|e| format!("mkdir_worker:{e}"))?;
     fs::create_dir_all(&p_path).map_err(|e| format!("mkdir_worker_custody:{e}"))?;
-    let w_root =
-        la_artifacts::open_owned_root(&w_path).map_err(|e| format!("open_w_root:{e}"))?;
-    let p_root =
-        la_artifacts::open_owned_root(&p_path).map_err(|e| format!("open_p_root:{e}"))?;
+    let w_root = la_artifacts::open_owned_root(&w_path).map_err(|e| format!("open_w_root:{e}"))?;
+    let p_root = la_artifacts::open_owned_root(&p_path).map_err(|e| format!("open_p_root:{e}"))?;
 
     let mut channel =
         TransportJournal::create(&w_root, &w_path, "worker-channel.sqlite", binding.clone())
@@ -753,11 +759,10 @@ fn run_worker_inner(config_path: &Path, bind: &str, state_dir: &Path) -> Result<
             ready_timeout_ms,
             require_ro_mount,
         } => {
-            let pin = DeviceUuid::parse(device_uuid)
-                .ok_or_else(|| "cuda_uuid_invalid".to_string())?;
+            let pin =
+                DeviceUuid::parse(device_uuid).ok_or_else(|| "cuda_uuid_invalid".to_string())?;
             let expected_sha = decode_hex32("helper_sha256", helper_sha256)?;
-            let artifact = File::open(helper_path)
-                .map_err(|e| format!("cuda_helper_open:{e}"))?;
+            let artifact = File::open(helper_path).map_err(|e| format!("cuda_helper_open:{e}"))?;
             let helper = CudaProcess::launch_native_configured(
                 artifact,
                 expected_sha,
@@ -810,8 +815,8 @@ fn run_worker_inner(config_path: &Path, bind: &str, state_dir: &Path) -> Result<
     }));
     {
         let mut w = w_state.lock().unwrap();
-        let digest = state_custody::state_digest(&w_root)
-            .map_err(|e| format!("worker_state_digest:{e}"))?;
+        let digest =
+            state_custody::state_digest(&w_root).map_err(|e| format!("worker_state_digest:{e}"))?;
         w.channel.set_owned_state(digest);
     }
 

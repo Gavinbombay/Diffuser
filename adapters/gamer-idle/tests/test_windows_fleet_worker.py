@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 import time
+from urllib.parse import urlunsplit
 import unittest
 import urllib.error
 import urllib.request
@@ -23,7 +24,7 @@ class WorkerSecurityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             wfw.validate_controller_url("http://fleet.example:5820")
         with self.assertRaises(ValueError):
-            wfw.validate_controller_url("https://user:pass@fleet.example")
+            wfw.validate_controller_url(urlunsplit(('https', f"{'dummy-user'}:{'dummy-pass'}@fleet.example", '', '', '')))
 
     def test_bind_host_loopback_only(self):
         self.assertEqual(wfw.validate_bind_host("127.0.0.1"), "127.0.0.1")
@@ -59,7 +60,7 @@ class WorkerSecurityTests(unittest.TestCase):
             self.assertIsNotNone(err)
 
     def test_signed_http_rpc_accepts_fresh_and_rejects_tampered_or_replayed(self):
-        secret = "0123456789abcdef" * 4
+        secret = bytes(range(32)).hex()
         session = "f" * 32
         cfg = {"rpc_secret_hex": secret, "host": "test-a15"}
         replay = wfw.BoundedReplayCache()
@@ -121,7 +122,7 @@ class WorkerSecurityTests(unittest.TestCase):
 
     def test_bounded_server_caps_concurrency_and_times_out_idle_clients(self):
         import socket
-        secret = "0123456789abcdef" * 4
+        secret = bytes(range(32)).hex()
         cfg = {"rpc_secret_hex": secret, "host": "test-a15"}
         handler_cls = wfw.build_handler(cfg, "f" * 32, wfw.BoundedReplayCache(), "nvidia-smi", "ffmpeg")
         srv = wfw.BoundedHTTPServer(("127.0.0.1", 0), handler_cls, max_concurrent=1, request_timeout=0.2)

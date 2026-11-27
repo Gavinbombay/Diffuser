@@ -1232,7 +1232,9 @@ impl TransportJournal {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct WorkerAdmission(pub(super) std::sync::Arc<std::sync::Mutex<Option<AdmissionLease>>>);
+pub(super) struct WorkerAdmission(
+    pub(super) std::sync::Arc<std::sync::Mutex<Option<AdmissionLease>>>,
+);
 pub(super) struct AdmissionLease {
     pub(super) issued_at: u64,
     pub(super) expires_at: u64,

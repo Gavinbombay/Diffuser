@@ -493,7 +493,9 @@ fn ready_queue(s: &Spine) -> Result<Vec<Value>> {
     let mut stmt = c
         .prepare("SELECT body FROM build_ready_jobs ORDER BY id")
         .map_err(unavailable)?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(unavailable)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(unavailable)?;
     rows.map(|row| {
         serde_json::from_str(&row.map_err(unavailable)?)
             .map_err(|_| Failure(70, "storage_unavailable"))
@@ -503,6 +505,7 @@ fn ready_queue(s: &Spine) -> Result<Vec<Value>> {
 
 async fn handle(
     State(s): State<Spine>,
+    fleet_health: Option<axum::Extension<fleet::FleetHealth>>,
     OriginalUri(uri): OriginalUri,
     m: Method,
     h: HeaderMap,
@@ -510,6 +513,7 @@ async fn handle(
 ) -> Response {
     let path = uri.path().to_string();
     let method = m.to_string();
+    let fleet_health = fleet_health.map(|axum::Extension(health)| health);
     let r = tokio::task::spawn_blocking(move || -> Result<(u16, Value)> {
         if matches!(method.as_str(), "GET" | "HEAD") && path == "/v1/build-lanes/ready" {
             if !s.admin {
@@ -531,6 +535,10 @@ async fn handle(
                     v["version"] = json!("0.3.0");
                     v["profile"] = json!(if s.edge { "embed-edge" } else { "primary" });
                     v["lanes_summary"] = json!(lanes());
+                    v["fleet"] = fleet_health
+                        .as_ref()
+                        .map(fleet::FleetHealth::summary)
+                        .unwrap_or_else(fleet::closed_health_summary);
                     v
                 }
                 "/v1/health" => json!({"protocol":"service-lane/v1","lanes":lanes(),"workers":[{"worker_id":"local-3060","accepting":false,"status":"retired"},{"worker_id":"local-2070","accepting":false,"status":"disabled_fault"}]}),
@@ -576,8 +584,10 @@ fn api(s: Spine) -> Router {
 #[derive(Clone)]
 struct ControlPeer(bool);
 
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::UnixListener>>
-    for ControlPeer
+impl
+    axum::extract::connect_info::Connected<
+        axum::serve::IncomingStream<'_, tokio::net::UnixListener>,
+    > for ControlPeer
 {
     fn connect_info(stream: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
         let owner = unsafe { libc::geteuid() };
@@ -606,7 +616,15 @@ fn api_with_namespace(s: Spine, namespace: Router<Spine>) -> Router {
     api_with_namespaces(s, namespace, fleet::closed_router())
 }
 fn api_with_namespaces(s: Spine, namespace: Router<Spine>, fleet_ns: Router<Spine>) -> Router {
-    Router::new()
+    api_with_fleet_health(s, namespace, fleet_ns, None)
+}
+fn api_with_fleet_health(
+    s: Spine,
+    namespace: Router<Spine>,
+    fleet_ns: Router<Spine>,
+    fleet_health: Option<fleet::FleetHealth>,
+) -> Router {
+    let router = Router::new()
         .nest("/v1/diffuser", namespace)
         .nest("/v1/fleet", fleet_ns)
         .route("/health", get(handle))
@@ -620,7 +638,12 @@ fn api_with_namespaces(s: Spine, namespace: Router<Spine>, fleet_ns: Router<Spin
         .route("/v1/lanes/{lane}/workers/{worker}/proof", post(handle))
         .route("/v1/lanes/{lane}/jobs", post(handle))
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
-        .with_state(s)
+        .with_state(s);
+    if let Some(health) = fleet_health {
+        router.layer(axum::Extension(health))
+    } else {
+        router
+    }
 }
 mod fleet;
 mod la_protected;
@@ -631,8 +654,7 @@ pub fn main_cli() -> i32 {
     if a.iter().any(|arg| arg == la_startup_check::SELECTOR) {
         return common::emit(la_startup_check::check(&a));
     }
-    let root =
-        PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/diffuser".into()));
+    let root = PathBuf::from(common::opt(&a, "--state-dir").unwrap_or("/var/lib/diffuser".into()));
     if let Some(fleet_worker_cfg) = common::opt(&a, "--fleet-worker") {
         return fleet::run_fleet_worker(Path::new(&fleet_worker_cfg));
     }
@@ -707,26 +729,29 @@ pub fn main_cli() -> i32 {
             root.join("cartridges"),
         ));
         let namespace = match protected_cfg {
-            Some(ref cfg_path) => match la_protected::bootstrap_controller(Path::new(cfg_path), &root) {
-                Ok(ns) => ns,
-                Err(err) => {
-                    eprintln!("protected_controller_error: {err}");
-                    return 70;
+            Some(ref cfg_path) => {
+                match la_protected::bootstrap_controller(Path::new(cfg_path), &root) {
+                    Ok(ns) => ns,
+                    Err(err) => {
+                        eprintln!("protected_controller_error: {err}");
+                        return 70;
+                    }
                 }
-            },
+            }
             None => lane_assignment::router(),
         };
-        let fleet_ns = match fleet_cfg {
-            Some(ref cfg_path) => match fleet::router(Path::new(cfg_path), &root) {
-                Ok(ns) => ns,
+        let (fleet_ns, fleet_health) = match fleet_cfg {
+            Some(ref cfg_path) => match fleet::router_with_health(Path::new(cfg_path), &root) {
+                Ok((ns, health)) => (ns, Some(health)),
                 Err(err) => {
                     eprintln!("fleet_controller_error: {err}");
                     return 70;
                 }
             },
-            None => fleet::closed_router(),
+            None => (fleet::closed_router(), None),
         };
-        let r = api_with_namespaces(s, namespace, fleet_ns).fallback_service(legacy);
+        let r =
+            api_with_fleet_health(s, namespace, fleet_ns, fleet_health).fallback_service(legacy);
         let port = match bind
             .strip_prefix("localhost:")
             .and_then(|v| v.parse::<u16>().ok())
@@ -787,7 +812,9 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-            let body = axum::body::to_bytes(denied.into_body(), 1024).await.unwrap();
+            let body = axum::body::to_bytes(denied.into_body(), 1024)
+                .await
+                .unwrap();
             assert!(!String::from_utf8_lossy(&body).contains("fixture-only input"));
         }
 
@@ -795,11 +822,17 @@ mod tests {
         custodial.admin = true;
         let api = control_api(custodial);
         for spoofed in [None, Some(axum::extract::ConnectInfo(ControlPeer(false)))] {
-            let mut request = Request::builder().uri(READY).body(axum::body::Body::empty()).unwrap();
+            let mut request = Request::builder()
+                .uri(READY)
+                .body(axum::body::Body::empty())
+                .unwrap();
             if let Some(peer) = spoofed {
                 request.extensions_mut().insert(peer);
             }
-            assert_eq!(api.clone().oneshot(request).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                api.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
         }
 
         // Keep the Unix address short even when Cargo's scratch directory is long.
@@ -807,9 +840,12 @@ mod tests {
         let socket = format!("/proc/self/fd/{}/control.sock", dir.as_raw_fd());
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, api.into_make_service_with_connect_info::<ControlPeer>())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                api.into_make_service_with_connect_info::<ControlPeer>(),
+            )
+            .await
+            .unwrap();
         });
         let reply: Value = tokio::task::spawn_blocking(move || {
             let _dir = dir;

@@ -156,9 +156,13 @@ fn fleet_cli(a: &[String]) -> Result<Value> {
     let token = fleet_token()?;
     let sub = a.first().map(String::as_str).unwrap_or("");
     let run_async = a.iter().any(|flag| flag == "--async");
-    let timeout_override = common::opt(a, "--timeout-secs").and_then(|value| value.parse::<u64>().ok());
+    let timeout_override =
+        common::opt(a, "--timeout-secs").and_then(|value| value.parse::<u64>().ok());
     let client_timeout = if sub == "submit" && !run_async {
-        timeout_override.unwrap_or(21_600).clamp(1, 21_600).saturating_add(60)
+        timeout_override
+            .unwrap_or(21_600)
+            .clamp(1, 21_600)
+            .saturating_add(60)
     } else {
         120
     };
@@ -217,8 +221,9 @@ fn fleet_cli(a: &[String]) -> Result<Value> {
         "submit" => {
             let capability =
                 common::opt(a, "--capability").ok_or(Failure(64, "capability_required"))?;
-            let key = common::opt(a, "--key")
-                .unwrap_or_else(|| format!("cli_{}", common::hash(format!("{capability}\n{:?}", a))));
+            let key = common::opt(a, "--key").unwrap_or_else(|| {
+                format!("cli_{}", common::hash(format!("{capability}\n{:?}", a)))
+            });
             let input_raw = common::opt(a, "--input").unwrap_or_else(|| "{}".into());
             let input: Value =
                 serde_json::from_str(&input_raw).map_err(|_| Failure(64, "invalid_input_json"))?;
@@ -248,7 +253,9 @@ fn fleet_cli(a: &[String]) -> Result<Value> {
     .map_err(|_| Failure(75, "diffuser_unavailable"))?;
 
     let ok = resp.status().is_success();
-    let val: Value = resp.json().map_err(|_| Failure(75, "diffuser_invalid_reply"))?;
+    let val: Value = resp
+        .json()
+        .map_err(|_| Failure(75, "diffuser_invalid_reply"))?;
     if !ok {
         println!("{val}");
         return common::fail(74, "diffuser_refused");

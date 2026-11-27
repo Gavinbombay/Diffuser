@@ -40,13 +40,13 @@ mod job_spec;
 mod lane_bodies;
 mod lane_gate;
 mod log_redaction;
-mod private_state;
 #[cfg(test)]
 #[path = "../tests/log_surfaces.rs"]
 mod log_surfaces;
 #[cfg(test)]
 #[path = "../tests/openapi_contract.rs"]
 mod openapi_contract;
+mod private_state;
 #[cfg(test)]
 mod proof_row_tests;
 #[cfg(test)]

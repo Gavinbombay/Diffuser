@@ -96,6 +96,9 @@ pub(super) struct FleetControllerConfig {
     pub(super) admin_token_sha256: String,
     #[serde(default)]
     pub(super) db_path: Option<String>,
+    /// Exact additional browser origins permitted to use the MCP endpoint.
+    #[serde(default)]
+    mcp_allowed_origins: Vec<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -261,13 +264,16 @@ fn random_id() -> io::Result<String> {
 }
 
 fn is_random_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn fleet_base_url(raw: &str) -> Option<Url> {
-    Url::parse(raw).ok().filter(|url| {
-        private_http_url(url) && url.query().is_none() && url.fragment().is_none()
-    })
+    Url::parse(raw)
+        .ok()
+        .filter(|url| private_http_url(url) && url.query().is_none() && url.fragment().is_none())
 }
 
 fn fleet_endpoint(base: &Url, endpoint: &str) -> Url {
@@ -393,8 +399,117 @@ fn bearer_from_headers(headers: &HeaderMap) -> Option<&str> {
 struct FleetState {
     db: Arc<Mutex<Connection>>,
     admin_sha256: String,
+    mcp_allowed_origins: Vec<String>,
     http: reqwest::blocking::Client,
     artifacts_dir: PathBuf,
+}
+
+#[derive(Clone)]
+pub(super) struct FleetHealth {
+    db: Arc<Mutex<Connection>>,
+}
+
+impl FleetHealth {
+    pub(super) fn summary(&self) -> Value {
+        let Ok(conn) = self.db.lock() else {
+            return json!({
+                "enabled": true,
+                "fleet_dispatch_allowed": false,
+                "workers_total": 0,
+                "workers_active": 0,
+                "workers_draining": 0,
+                "workers_quarantined": 0,
+                "workers_offline": 0,
+                "capabilities_count": 0,
+                "error": "storage_unavailable"
+            });
+        };
+        let mut stmt = match conn
+            .prepare("SELECT status, last_heartbeat_ms, capabilities_json FROM fleet_workers")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => {
+                return json!({
+                    "enabled": true,
+                    "fleet_dispatch_allowed": false,
+                    "workers_total": 0,
+                    "workers_active": 0,
+                    "workers_draining": 0,
+                    "workers_quarantined": 0,
+                    "workers_offline": 0,
+                    "capabilities_count": 0,
+                    "error": "storage_unavailable"
+                });
+            }
+        };
+        let now = now_ms();
+        let mut workers_total: u64 = 0;
+        let mut workers_active: u64 = 0;
+        let mut workers_draining: u64 = 0;
+        let mut workers_quarantined: u64 = 0;
+        let mut workers_offline: u64 = 0;
+        let mut capabilities: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (status, hb, caps_s) = row;
+                workers_total += 1;
+                let alive = now.saturating_sub(hb as u64) <= HEARTBEAT_TTL_MS;
+                if !alive {
+                    workers_offline += 1;
+                    continue;
+                }
+                match status.as_str() {
+                    "active" => {
+                        workers_active += 1;
+                        if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&caps_s) {
+                            for item in items {
+                                if let Some(name) = item.get("capability").and_then(Value::as_str) {
+                                    if !name.is_empty() {
+                                        capabilities.insert(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "draining" => workers_draining += 1,
+                    "quarantined" => workers_quarantined += 1,
+                    _ => workers_offline += 1,
+                }
+            }
+        }
+
+        json!({
+            "enabled": true,
+            "fleet_dispatch_allowed": workers_active > 0,
+            "workers_total": workers_total,
+            "workers_active": workers_active,
+            "workers_draining": workers_draining,
+            "workers_quarantined": workers_quarantined,
+            "workers_offline": workers_offline,
+            "capabilities_count": capabilities.len()
+        })
+    }
+}
+
+pub(super) fn closed_health_summary() -> Value {
+    json!({
+        "enabled": false,
+        "fleet_dispatch_allowed": false,
+        "workers_total": 0,
+        "workers_active": 0,
+        "workers_draining": 0,
+        "workers_quarantined": 0,
+        "workers_offline": 0,
+        "capabilities_count": 0
+    })
 }
 
 #[derive(Clone)]
@@ -504,6 +619,7 @@ impl FleetState {
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
             admin_sha256: admin_sha,
+            mcp_allowed_origins: cfg.mcp_allowed_origins,
             http,
             artifacts_dir,
         })
@@ -593,12 +709,22 @@ pub(super) fn closed_router() -> Router<super::Spine> {
         .route("/artifacts", post(closed))
         .route("/artifacts/{artifact_id}", get(closed))
         .route("/artifacts/{artifact_id}/content", get(closed))
-        .route("/mcp", post(closed))
+        .route("/mcp", post(closed).get(closed).delete(closed))
 }
 
 pub(super) fn router(cfg_path: &Path, state_dir: &Path) -> Result<Router<super::Spine>, String> {
+    router_with_health(cfg_path, state_dir).map(|(router, _)| router)
+}
+
+pub(super) fn router_with_health(
+    cfg_path: &Path,
+    state_dir: &Path,
+) -> Result<(Router<super::Spine>, FleetHealth), String> {
     let state = FleetState::open(cfg_path, state_dir)?;
-    Ok(Router::new()
+    let health = FleetHealth {
+        db: Arc::clone(&state.db),
+    };
+    let router = Router::new()
         .route("/discover", get(handle_discover))
         .route("/workers", get(handle_list_workers))
         .route("/workers/enroll", post(handle_enroll))
@@ -613,11 +739,27 @@ pub(super) fn router(cfg_path: &Path, state_dir: &Path) -> Result<Router<super::
         .route("/jobs/{job_id}", get(handle_get_job))
         .route("/ui", get(handle_ui))
         .route("/ui/", get(handle_ui_redirect))
-        .route("/artifacts", post(handle_upload_artifact).layer(axum::extract::DefaultBodyLimit::max(MAX_ARTIFACT_BYTES)))
-        .route("/artifacts/{artifact_id}", get(handle_get_artifact_manifest))
-        .route("/artifacts/{artifact_id}/content", get(handle_get_artifact_content))
-        .route("/mcp", post(handle_mcp))
-        .with_state(state))
+        .route(
+            "/artifacts",
+            post(handle_upload_artifact)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_ARTIFACT_BYTES)),
+        )
+        .route(
+            "/artifacts/{artifact_id}",
+            get(handle_get_artifact_manifest),
+        )
+        .route(
+            "/artifacts/{artifact_id}/content",
+            get(handle_get_artifact_content),
+        )
+        .route(
+            "/mcp",
+            post(handle_mcp)
+                .get(handle_mcp_unsupported)
+                .delete(handle_mcp_unsupported),
+        )
+        .with_state(state);
+    Ok((router, health))
 }
 
 async fn handle_ui() -> Response {
@@ -665,19 +807,38 @@ async fn handle_enroll(
     Json(req): Json<EnrollRequest>,
 ) -> Response {
     if !state.check_admin(&headers) {
-        return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "admin bearer required",
+        );
     }
     let Some(rpc_url) = fleet_base_url(&req.rpc_url) else {
-        return err_resp(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "invalid RPC URL");
+        return err_resp(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "invalid RPC URL",
+        );
     };
-    if req.worker_id.trim().is_empty() || req.rpc_secret_hex.len() < 32 || !is_random_id(&req.rpc_session) {
-        return err_resp(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "invalid worker_id, rpc_secret_hex, or rpc_session");
+    if req.worker_id.trim().is_empty()
+        || req.rpc_secret_hex.len() < 32
+        || !is_random_id(&req.rpc_session)
+    {
+        return err_resp(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "invalid worker_id, rpc_secret_hex, or rpc_session",
+        );
     }
     let gpus_json = serde_json::to_string(&req.gpus).unwrap_or_else(|_| "[]".into());
     let caps_json = serde_json::to_string(&req.capabilities).unwrap_or_else(|_| "[]".into());
     let ts = now_ms() as i64;
     let Ok(conn) = state.db.lock() else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "db lock failed",
+        );
     };
     let status = conn.query_row(
         "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, cpu_reserved, ram_reserved, vram_reserved, gpus_json, capabilities_json, status, last_heartbeat_ms, rpc_session)
@@ -685,7 +846,7 @@ async fn handle_enroll(
          ON CONFLICT(worker_id) DO UPDATE SET
            host=excluded.host,
            rpc_url=excluded.rpc_url,
-           rpc_secret_hex=excluded.rpc_secret_hex,
+           rpc_secret_hex=?4,
            rpc_session=excluded.rpc_session,
            cpu_total=excluded.cpu_total,
            ram_total=excluded.ram_total,
@@ -725,7 +886,11 @@ async fn handle_enroll(
         |row| row.get::<_, String>(0),
     );
     let Ok(status) = status else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "enroll write failed");
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "enroll write failed",
+        );
     };
     Json(json!({
         "schema_version": "diffuser-fleet/v1",
@@ -757,7 +922,11 @@ async fn handle_heartbeat(
     Json(body): Json<Value>,
 ) -> Response {
     if !state.check_admin(&headers) {
-        return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "admin bearer required",
+        );
     }
     let req: HeartbeatRequest = match serde_json::from_value(body.clone()) {
         Ok(req) => req,
@@ -788,13 +957,19 @@ async fn handle_heartbeat(
     // Per-GPU detail is always tied to the latest heartbeat; omitting gpus_live clears any
     // prior per-GPU sample so an exact GPU pin cannot reuse stale VRAM data.
     let detail_json = match body.get("gpus_live") {
-        Some(value) if !value.is_null() => serde_json::from_value::<Vec<LiveGpuSample>>(value.clone())
-            .ok()
-            .and_then(|gpus| serde_json::to_string(&gpus).ok()),
+        Some(value) if !value.is_null() => {
+            serde_json::from_value::<Vec<LiveGpuSample>>(value.clone())
+                .ok()
+                .and_then(|gpus| serde_json::to_string(&gpus).ok())
+        }
         _ => None,
     };
     let Ok(conn) = state.db.lock() else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "db lock failed",
+        );
     };
     let updated = conn.execute(
         "UPDATE fleet_workers SET
@@ -819,9 +994,19 @@ async fn handle_heartbeat(
         ],
     );
     match updated {
-        Ok(0) => err_resp(StatusCode::NOT_FOUND, "worker_not_found", "unknown worker_id"),
-        Ok(_) => Json(json!({"ok": true, "worker_id": worker_id, "heartbeat_ms": ts})).into_response(),
-        Err(_) => err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "heartbeat write failed"),
+        Ok(0) => err_resp(
+            StatusCode::NOT_FOUND,
+            "worker_not_found",
+            "unknown worker_id",
+        ),
+        Ok(_) => {
+            Json(json!({"ok": true, "worker_id": worker_id, "heartbeat_ms": ts})).into_response()
+        }
+        Err(_) => err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "heartbeat write failed",
+        ),
     }
 }
 
@@ -831,7 +1016,11 @@ async fn handle_drain(
     request: Request,
 ) -> Response {
     if !state.check_admin(request.headers()) {
-        return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "admin bearer required",
+        );
     }
     let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
     let bytes = match Bytes::from_request(request, &()).await {
@@ -1001,7 +1190,11 @@ fn list_workers_json(state: &FleetState) -> Result<Vec<Value>, &'static str> {
 
 async fn handle_list_workers(State(state): State<FleetState>, headers: HeaderMap) -> Response {
     if !state.check_admin(&headers) {
-        return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "admin bearer required",
+        );
     }
     match list_workers_json(&state) {
         Ok(workers) => Json(json!({
@@ -1009,7 +1202,11 @@ async fn handle_list_workers(State(state): State<FleetState>, headers: HeaderMap
             "workers": workers
         }))
         .into_response(),
-        Err(c) => err_resp(StatusCode::SERVICE_UNAVAILABLE, c, "failed to query workers"),
+        Err(c) => err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            c,
+            "failed to query workers",
+        ),
     }
 }
 
@@ -1145,7 +1342,11 @@ async fn handle_list_tokens(
     query: Result<Query<TokenListFilters>, QueryRejection>,
 ) -> Response {
     if !state.check_admin(&headers) {
-        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "admin bearer required",
+        );
     }
     let Ok(Query(filters)) = query else {
         return invalid_request("invalid token list filters");
@@ -1177,7 +1378,10 @@ fn default_token_ttl() -> u64 {
 }
 
 fn issue_token_inner(state: &FleetState, req: &IssueTokenRequest) -> Result<Value, &'static str> {
-    if req.actor.trim().is_empty() || req.project.trim().is_empty() || req.allowed_capabilities.is_empty() {
+    if req.actor.trim().is_empty()
+        || req.project.trim().is_empty()
+        || req.allowed_capabilities.is_empty()
+    {
         return Err("invalid_request");
     }
     let mut raw_bytes = [0u8; 24];
@@ -1189,7 +1393,8 @@ fn issue_token_inner(state: &FleetState, req: &IssueTokenRequest) -> Result<Valu
     let token_id = format!("tk_{}", &token_sha[..16]);
     let now = now_ms();
     let expires = now.saturating_add(req.ttl_secs.saturating_mul(1000));
-    let caps_json = serde_json::to_string(&req.allowed_capabilities).map_err(|_| "invalid_request")?;
+    let caps_json =
+        serde_json::to_string(&req.allowed_capabilities).map_err(|_| "invalid_request")?;
     let conn = state.db.lock().map_err(|_| "storage_unavailable")?;
     conn.execute(
         "INSERT INTO fleet_tokens (token_id, token_sha256, actor, project, allowed_capabilities_json, max_vram_bytes, created_at_ms, expires_at_ms, revoked)
@@ -1223,7 +1428,11 @@ async fn handle_issue_token(
     Json(req): Json<IssueTokenRequest>,
 ) -> Response {
     if !state.check_admin(&headers) {
-        return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "admin bearer required",
+        );
     }
     match issue_token_inner(&state, &req) {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
@@ -1237,7 +1446,11 @@ async fn handle_revoke_token(
     AxPath(token_id): AxPath<String>,
 ) -> Response {
     if !state.check_admin(&headers) {
-        return err_resp(StatusCode::UNAUTHORIZED, "auth_required", "admin bearer required");
+        return err_resp(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "admin bearer required",
+        );
     }
     match revoke_token_inner(&state, &token_id) {
         Ok(value) => Json(value).into_response(),
@@ -1444,25 +1657,46 @@ fn prepare_job(
     req: &SubmitJobRequest,
 ) -> Result<PrepareOutcome, (StatusCode, &'static str, String)> {
     if idemp_key.trim().is_empty() || req.capability.trim().is_empty() {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", "missing capability or Idempotency-Key".into()));
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "missing capability or Idempotency-Key".into(),
+        ));
     }
     if !FleetState::capability_allowed(auth, &req.capability) {
-        return Err((StatusCode::FORBIDDEN, "capability_forbidden", "token does not allow this capability".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "capability_forbidden",
+            "token does not allow this capability".into(),
+        ));
     }
     if req.min_vram_bytes > auth.max_vram_bytes {
-        return Err((StatusCode::FORBIDDEN, "vram_limit_exceeded", "requested VRAM exceeds token limit".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "vram_limit_exceeded",
+            "requested VRAM exceeds token limit".into(),
+        ));
     }
 
     let now = now_ms();
     let input_str = serde_json::to_string(&req.input).unwrap_or_else(|_| "{}".into());
 
-    let mut conn = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock".into()))?;
+    let mut conn = state.db.lock().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "db lock".into(),
+        )
+    })?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx begin".into()))?;
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "storage_unavailable",
+                "tx begin".into(),
+            )
+        })?;
 
     let existing: Option<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64)> = tx
         .query_row(
@@ -1540,9 +1774,21 @@ fn prepare_job(
                 r.get(13)?,
             ))
         })
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched map".into()))?
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "storage_unavailable",
+                "sched map".into(),
+            )
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "sched collect".into()))?;
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "storage_unavailable",
+                "sched collect".into(),
+            )
+        })?;
     drop(stmt);
     candidates.sort_by(|a, b| {
         worker_tier_rank(&a.0, a.13)
@@ -1675,7 +1921,11 @@ fn prepare_job(
     }
 
     let nonce = random_id().map_err(|_| {
-        (StatusCode::SERVICE_UNAVAILABLE, "entropy_unavailable", "job identity unavailable".into())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "entropy_unavailable",
+            "job identity unavailable".into(),
+        )
     })?;
     let jid = format!("fjob_{nonce}");
 
@@ -1692,8 +1942,13 @@ fn prepare_job(
     )
     .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "job insert failed".into()))?;
 
-    tx.commit()
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "tx commit".into()))?;
+    tx.commit().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "tx commit".into(),
+        )
+    })?;
 
     Ok(PrepareOutcome::Fresh(FreshJob {
         job_id: jid,
@@ -1940,10 +2195,9 @@ fn spawn_dispatch(
         let state_call = state.clone();
         let job_call = job.clone();
         let req_call = req.clone();
-        let joined = tokio::task::spawn_blocking(move || {
-            dispatch_worker(&state_call, &job_call, &req_call)
-        })
-        .await;
+        let joined =
+            tokio::task::spawn_blocking(move || dispatch_worker(&state_call, &job_call, &req_call))
+                .await;
         let (outcome, panicked) = match joined {
             Ok(outcome) => (outcome, false),
             Err(_) => (panicked_outcome(), true),
@@ -2216,7 +2470,6 @@ async fn handle_get_job(
     }
 }
 
-
 async fn handle_upload_artifact(
     State(state): State<FleetState>,
     headers: HeaderMap,
@@ -2245,11 +2498,19 @@ async fn handle_upload_artifact(
     let artifact_id = format!("fart_{}", hex::encode(rnd));
     let file_path = state.artifacts_dir.join(&artifact_id);
     if fs::write(&file_path, &body).is_err() {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "artifact write failed");
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "artifact write failed",
+        );
     }
     let ts = now_ms() as i64;
     let Ok(conn) = state.db.lock() else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "db lock failed",
+        );
     };
     if conn
         .execute(
@@ -2285,7 +2546,11 @@ async fn handle_get_artifact_manifest(
         Err((st, code)) => return err_resp(st, code, "authentication failed"),
     };
     let Ok(conn) = state.db.lock() else {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "db lock failed",
+        );
     };
     let row: Option<(String, String, String, i64, String, i64)> = conn
         .query_row(
@@ -2296,10 +2561,18 @@ async fn handle_get_artifact_manifest(
         .optional()
         .unwrap_or(None);
     let Some((actor, project, digest, bytes, media_type, ts)) = row else {
-        return err_resp(StatusCode::NOT_FOUND, "artifact_not_found", "unknown artifact_id");
+        return err_resp(
+            StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            "unknown artifact_id",
+        );
     };
     if !auth.is_admin && (actor != auth.actor || project != auth.project) {
-        return err_resp(StatusCode::FORBIDDEN, "forbidden", "artifact belongs to another caller");
+        return err_resp(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "artifact belongs to another caller",
+        );
     }
     Json(json!({
         "schema_version": "diffuser-fleet/v1",
@@ -2325,11 +2598,19 @@ async fn handle_get_artifact_content(
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_')
     {
-        return err_resp(StatusCode::BAD_REQUEST, "invalid_artifact_id", "invalid characters");
+        return err_resp(
+            StatusCode::BAD_REQUEST,
+            "invalid_artifact_id",
+            "invalid characters",
+        );
     }
     let meta: Option<(String, String, String, String)> = {
         let Ok(conn) = state.db.lock() else {
-            return err_resp(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "db lock failed");
+            return err_resp(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "storage_unavailable",
+                "db lock failed",
+            );
         };
         conn.query_row(
             "SELECT actor, project, sha256, media_type FROM fleet_artifacts WHERE artifact_id=?1",
@@ -2340,16 +2621,32 @@ async fn handle_get_artifact_content(
         .unwrap_or(None)
     };
     let Some((actor, project, expected_sha, media_type)) = meta else {
-        return err_resp(StatusCode::NOT_FOUND, "artifact_not_found", "unknown artifact_id");
+        return err_resp(
+            StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            "unknown artifact_id",
+        );
     };
     if !auth.is_admin && (actor != auth.actor || project != auth.project) {
-        return err_resp(StatusCode::FORBIDDEN, "forbidden", "artifact belongs to another caller");
+        return err_resp(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "artifact belongs to another caller",
+        );
     }
     let Ok(bytes) = fs::read(state.artifacts_dir.join(&artifact_id)) else {
-        return err_resp(StatusCode::NOT_FOUND, "artifact_missing", "artifact bytes missing");
+        return err_resp(
+            StatusCode::NOT_FOUND,
+            "artifact_missing",
+            "artifact bytes missing",
+        );
     };
     if sha256_hex(&bytes) != expected_sha {
-        return err_resp(StatusCode::INTERNAL_SERVER_ERROR, "artifact_integrity_failed", "digest mismatch");
+        return err_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact_integrity_failed",
+            "digest mismatch",
+        );
     }
     (
         StatusCode::OK,
@@ -2364,10 +2661,75 @@ async fn handle_get_artifact_content(
 
 // === MCP JSON-RPC 2.0 Surface (/v1/fleet/mcp) ===
 
+// Streamable HTTP handshake-based revisions with individual JSON-RPC messages.
+const MCP_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18"];
+
+fn mcp_transport_auth(state: &FleetState, headers: &HeaderMap) -> Result<CallerAuth, Response> {
+    let auth = state.authenticate(headers).map_err(|(status, code)| {
+        let mut response = err_resp(status, code, "authentication failed");
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        if status == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+        }
+        response
+    })?;
+    // Native clients do not send Origin. Browsers must use a trusted local or
+    // explicitly configured origin, not an arbitrary request Host header.
+    let origins = headers.get_all(header::ORIGIN);
+    if let Some(origin) = origins.iter().next() {
+        let valid = origins.iter().count() == 1
+            && origin.to_str().ok().is_some_and(|origin| {
+                Url::parse(origin).ok().is_some_and(|url| {
+                    matches!(url.scheme(), "http" | "https")
+                        && url.origin().ascii_serialization() == origin
+                        && (matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+                            || state
+                                .mcp_allowed_origins
+                                .iter()
+                                .any(|allowed| allowed == origin))
+                })
+            });
+        if !valid {
+            return Err((StatusCode::FORBIDDEN, NO_STORE).into_response());
+        }
+    }
+    if let Some(version) = headers.get("mcp-protocol-version") {
+        if headers.get_all("mcp-protocol-version").iter().count() != 1
+            || !version
+                .to_str()
+                .ok()
+                .is_some_and(|version| MCP_VERSIONS.contains(&version))
+        {
+            return Err(mcp_http_error(
+                StatusCode::BAD_REQUEST,
+                -32600,
+                "unsupported MCP protocol version",
+            ));
+        }
+    }
+    Ok(auth)
+}
+
+async fn handle_mcp_unsupported(State(state): State<FleetState>, headers: HeaderMap) -> Response {
+    if let Err(response) = mcp_transport_auth(&state, &headers) {
+        return response;
+    }
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        NO_STORE,
+        [(header::ALLOW, "POST")],
+    )
+        .into_response()
+}
+
 async fn handle_mcp(State(state): State<FleetState>, request: Request) -> Response {
-    let auth = match state.authenticate(request.headers()) {
-        Ok(a) => a,
-        Err((st, code)) => return err_resp(st, code, "authentication failed"),
+    let auth = match mcp_transport_auth(&state, request.headers()) {
+        Ok(auth) => auth,
+        Err(response) => return response,
     };
     let req = match Json::<Value>::from_request(request, &()).await {
         Ok(Json(req)) => req,
@@ -2385,44 +2747,77 @@ async fn handle_mcp(State(state): State<FleetState>, request: Request) -> Respon
     let Some(method) = method.filter(|_| req["jsonrpc"] == "2.0" && valid_id) else {
         return mcp_error(&Value::Null, -32600, "invalid request");
     };
-    // Notifications have no response envelope and never execute a tool.
+    let params = req.get("params");
+    let valid_params = params.is_none_or(|params| {
+        params.is_object() && params.get("_meta").is_none_or(Value::is_object)
+    });
+    // Notifications never execute a tool and never return a JSON-RPC result.
     let Some(id) = id else {
+        if !valid_params {
+            return (StatusCode::BAD_REQUEST, NO_STORE).into_response();
+        }
         return (StatusCode::ACCEPTED, NO_STORE).into_response();
     };
-    let params = req.get("params");
-    if matches!(
-        method,
-        "initialize" | "tools/list" | "notifications/initialized" | "ping"
-    ) {
-        let valid = params.is_none_or(|params| {
-            params.as_object().is_some_and(|object| {
-                !matches!(method, "notifications/initialized" | "ping") || object.is_empty()
-            })
-        });
-        if !valid {
-            return mcp_invalid_params(id);
-        }
+    if !valid_params {
+        return mcp_invalid_params(id);
     }
     match method {
-        "notifications/initialized" => mcp_result(id, Value::Null),
-        "ping" => mcp_result(id, json!({})),
-        "initialize" => mcp_result(
-            id,
-            json!({
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": { "name": "diffuser-fleet", "version": "1.0.0" },
+        "notifications/initialized" => mcp_error(id, -32600, "initialized must be a notification"),
+        "ping" => {
+            if params
+                .is_some_and(|params| params.as_object().unwrap().keys().any(|key| key != "_meta"))
+            {
+                return mcp_invalid_params(id);
+            }
+            mcp_result(id, json!({}))
+        }
+        "initialize" => {
+            let Some(params) = params else {
+                return mcp_invalid_params(id);
+            };
+            let Some(requested) = params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+            else {
+                return mcp_invalid_params(id);
+            };
+            if !params.get("capabilities").is_some_and(Value::is_object)
+                || !params.get("clientInfo").is_some_and(|info| {
+                    info.is_object()
+                        && info.get("name").is_some_and(Value::is_string)
+                        && info.get("version").is_some_and(Value::is_string)
+                })
+            {
+                return mcp_invalid_params(id);
+            }
+            let version = MCP_VERSIONS
+                .iter()
+                .copied()
+                .find(|v| *v == requested)
+                .unwrap_or(MCP_VERSIONS[0]);
+            mcp_result(
+                id,
+                json!({
+                    "protocolVersion": version,
+                    "serverInfo": { "name": "diffuser-fleet", "version": env!("CARGO_PKG_VERSION") },
                     "capabilities": { "tools": {} }
-            }),
-        ),
+                }),
+            )
+        }
+        "tools/list" if params.is_some_and(|p| p.get("cursor").is_some()) => {
+            // All tools fit on a single page; no continuation cursor is issued.
+            mcp_invalid_params(id)
+        }
         "tools/list" => mcp_result(
             id,
             json!({
                     "tools": [
                         {"name": "fleet_discover", "description": "Discover live Diffuser capabilities and available CPU/GPU capacity.", "inputSchema": {"type": "object", "properties": {}}},
                         {"name": "fleet_list_workers", "description": "List all enrolled Diffuser workers and live resources (admin).", "inputSchema": {"type": "object", "properties": {}}},
-                        {"name": "fleet_submit_job", "description": "Submit an idempotent job by capability and optional exact GPU UUID. Set async true to return while the job is still running.", "inputSchema": {"type": "object", "required": ["capability", "idempotency_key"], "properties": {"capability": {"type": "string"}, "idempotency_key": {"type": "string"}, "pin_gpu_uuid": {"type": "string"}, "input": {"type": "object"}, "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 21600}, "async": {"type": "boolean"}}}},
+                        {"name": "fleet_submit_job", "description": "Submit an idempotent job by capability and optional exact GPU UUID. Set async true to return while the job is still running.", "inputSchema": {"type": "object", "required": ["capability", "idempotency_key"], "properties": {"capability": {"type": "string"}, "idempotency_key": {"type": "string"}, "pin_gpu_uuid": {"type": "string"}, "input": {"type": "object"}, "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 21600}, "min_vram_bytes": {"type": "integer", "minimum": 0}, "cpu_millicores": {"type": "integer", "minimum": 0}, "ram_bytes": {"type": "integer", "minimum": 0}, "async": {"type": "boolean"}}}},
                         {"name": "fleet_get_job", "description": "Read durable job status and verified output digest.", "inputSchema": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}}},
-                        {"name": "fleet_issue_token", "description": "Issue a scoped caller token for a human or agent (admin).", "inputSchema": {"type": "object", "required": ["actor", "project", "allowed_capabilities"], "properties": {"actor": {"type": "string"}, "project": {"type": "string"}, "allowed_capabilities": {"type": "array", "items": {"type": "string"}}}}},
+                        {"name": "fleet_issue_token", "description": "Issue a scoped caller token for a human or agent (admin).", "inputSchema": {"type": "object", "required": ["actor", "project", "allowed_capabilities"], "properties": {"actor": {"type": "string"}, "project": {"type": "string"}, "allowed_capabilities": {"type": "array", "items": {"type": "string"}}, "max_vram_bytes": {"type": "integer", "minimum": 0}, "ttl_secs": {"type": "integer", "minimum": 0}}}},
                         {"name": "fleet_list_jobs", "description": "List durable job summaries in the caller's scope. Admin callers see all jobs.", "inputSchema": {"type": "object", "additionalProperties": false, "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "state": {"type": "string"}, "capability": {"type": "string"}, "worker_id": {"type": "string"}}}},
                         {"name": "fleet_drain_worker", "description": "Drain or resume worker admission (admin required).", "inputSchema": {"type": "object", "additionalProperties": false, "required": ["worker_id"], "properties": {"worker_id": {"type": "string", "minLength": 1}, "accepting": {"type": "boolean", "default": false}}}},
                         {"name": "fleet_revoke_token", "description": "Revoke a scoped caller token (admin required).", "inputSchema": {"type": "object", "additionalProperties": false, "required": ["token_id"], "properties": {"token_id": {"type": "string", "minLength": 1}}}},
@@ -2444,50 +2839,88 @@ async fn handle_mcp(State(state): State<FleetState>, request: Request) -> Respon
             let args = params.get("arguments");
             if matches!(
                 name,
-                "fleet_list_jobs" | "fleet_drain_worker" | "fleet_revoke_token" | "fleet_list_tokens"
+                "fleet_list_jobs"
+                    | "fleet_drain_worker"
+                    | "fleet_revoke_token"
+                    | "fleet_list_tokens"
             ) {
                 return mcp_fleet_tool(state, auth, id, name, args).await;
             }
-            let args = args.cloned().unwrap_or(Value::Null);
-            let result: Result<Value, String> = match name {
-                "fleet_discover" => discover_json(&state, &auth).map_err(|e| e.to_string()),
-                "fleet_list_workers" => {
-                    if !auth.is_admin {
-                        Err("admin_required".into())
-                    } else {
-                        list_workers_json(&state)
-                            .map(|w| json!({"workers": w}))
-                            .map_err(|e| e.to_string())
-                    }
-                }
-                "fleet_get_job" => {
-                    let jid = args["job_id"].as_str().unwrap_or("");
-                    get_job_inner(&state, &auth, jid, false).map_err(|(_, c)| c.to_string())
-                }
-                "fleet_issue_token" => {
-                    if !auth.is_admin {
-                        Err("admin_required".into())
-                    } else {
-                        serde_json::from_value::<IssueTokenRequest>(args)
-                            .map_err(|e| format!("invalid_args:{e}"))
-                            .and_then(|r| issue_token_inner(&state, &r).map_err(|e| e.to_string()))
-                    }
-                }
-                "fleet_submit_job" => {
-                    let idemp = args["idempotency_key"].as_str().unwrap_or("").to_string();
-                    match serde_json::from_value::<SubmitJobRequest>(args) {
-                        Ok(sub) => match submit_job(state.clone(), auth.clone(), idemp, sub).await {
-                            Ok((_, v)) => Ok(v),
-                            Err((_, c, m)) => Err(format!("{c}: {m}")),
-                        },
-                        Err(e) => Err(format!("invalid_args:{e}")),
-                    }
-                }
+            if matches!(name, "fleet_list_workers" | "fleet_issue_token") && !auth.is_admin {
+                return mcp_error(id, -32000, "admin_required");
+            }
+            let args = match args {
+                None => json!({}),
+                Some(args) if args.is_object() => args.clone(),
                 _ => return mcp_invalid_params(id),
             };
-            match result {
-                Ok(value) => mcp_content(id, value),
-                Err(error) => mcp_error(id, -32000, &error),
+            match name {
+                "fleet_discover" => match discover_json(&state, &auth) {
+                    Ok(value) => mcp_content(id, value),
+                    Err(error) => mcp_error(id, -32000, &error.to_string()),
+                },
+                "fleet_list_workers" => match list_workers_json(&state) {
+                    Ok(workers) => mcp_content(id, json!({"workers": workers})),
+                    Err(error) => mcp_error(id, -32000, &error.to_string()),
+                },
+                "fleet_get_job" => {
+                    let Some(jid) = args["job_id"].as_str().filter(|s| !s.trim().is_empty()) else {
+                        return mcp_invalid_params(id);
+                    };
+                    match get_job_inner(&state, &auth, jid, false) {
+                        Ok(value) => mcp_content(id, value),
+                        Err((status, code))
+                            if status.is_server_error() || status == StatusCode::FORBIDDEN =>
+                        {
+                            mcp_error(id, -32000, code)
+                        }
+                        Err((_, code)) => mcp_tool_failure(id, code),
+                    }
+                }
+                "fleet_issue_token" => match serde_json::from_value::<IssueTokenRequest>(args) {
+                    Ok(req) => match issue_token_inner(&state, &req) {
+                        Ok(value) => mcp_content(id, value),
+                        Err("invalid_request") => mcp_tool_failure(id, "invalid_request"),
+                        Err(error) => mcp_error(id, -32000, error),
+                    },
+                    Err(_) => mcp_invalid_params(id),
+                },
+                "fleet_submit_job" => {
+                    let Some(idemp) = args["idempotency_key"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_owned)
+                    else {
+                        return mcp_invalid_params(id);
+                    };
+                    if args.get("input").is_some_and(|v| !v.is_object())
+                        || args.get("timeout_secs").is_some_and(|v| {
+                            !v.as_u64()
+                                .is_some_and(|n| (1..=MAX_JOB_TIMEOUT_SECS).contains(&n))
+                        })
+                        || args.get("pin_gpu_uuid").is_some_and(|v| !v.is_string())
+                    {
+                        return mcp_invalid_params(id);
+                    }
+                    match serde_json::from_value::<SubmitJobRequest>(args) {
+                        Ok(sub) => {
+                            match submit_job(state.clone(), auth.clone(), idemp, sub).await {
+                                Ok((_, v)) => mcp_content(id, v),
+                                Err((status, code, message))
+                                    if status.is_server_error()
+                                        || status == StatusCode::FORBIDDEN =>
+                                {
+                                    mcp_error(id, -32000, &format!("{code}: {message}"))
+                                }
+                                Err((_, code, message)) => {
+                                    mcp_tool_failure(id, &format!("{code}: {message}"))
+                                }
+                            }
+                        }
+                        Err(_) => mcp_invalid_params(id),
+                    }
+                }
+                _ => mcp_error(id, -32602, "unknown tool"),
             }
         }
         _ => mcp_error(id, -32601, "method not found"),
@@ -2505,8 +2938,21 @@ fn mcp_result(id: &Value, result: Value) -> Response {
 fn mcp_content(id: &Value, value: Value) -> Response {
     mcp_result(
         id,
-        json!({"content": [{"type": "text", "text": value.to_string()}]}),
+        json!({"isError": false, "content": [{"type": "text", "text": value.to_string()}]}),
     )
+}
+
+fn mcp_tool_failure(id: &Value, message: &str) -> Response {
+    mcp_result(
+        id,
+        json!({"isError": true, "content": [{"type": "text", "text": message}]}),
+    )
+}
+
+fn mcp_http_error(status: StatusCode, code: i32, message: &str) -> Response {
+    let mut response = mcp_error(&Value::Null, code, message);
+    *response.status_mut() = status;
+    response
 }
 
 fn mcp_error(id: &Value, code: i32, message: &str) -> Response {
@@ -2577,12 +3023,7 @@ async fn mcp_fleet_tool(
     };
     match result {
         Ok(value) => mcp_content(id, value),
-        Err((StatusCode::NOT_FOUND | StatusCode::CONFLICT, code)) => mcp_result(
-            id,
-            json!({
-                "isError": true, "content": [{"type": "text", "text": code}]
-            }),
-        ),
+        Err((StatusCode::NOT_FOUND | StatusCode::CONFLICT, code)) => mcp_tool_failure(id, code),
         Err((_, code)) => mcp_error(id, -32000, code),
     }
 }
@@ -2660,7 +3101,10 @@ fn live_heartbeat_payload() -> Value {
 
 fn detect_local_gpus() -> Vec<GpuInfo> {
     let Ok(out) = Command::new("nvidia-smi")
-        .args(["--query-gpu=uuid,name,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=uuid,name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
     else {
         return Vec::new();
@@ -2701,7 +3145,10 @@ impl ReplayWindow {
     fn consume(&mut self, job_id: &str, issued_at_ms: u64, now: u64) -> Result<(), &'static str> {
         // A clock rollback must never make an evicted nonce valid again.
         let oldest = self.latest_ms.max(now).saturating_sub(RPC_MAX_AGE_MS);
-        if now == 0 || issued_at_ms < oldest || issued_at_ms > now.saturating_add(RPC_FUTURE_SKEW_MS) {
+        if now == 0
+            || issued_at_ms < oldest
+            || issued_at_ms > now.saturating_add(RPC_FUTURE_SKEW_MS)
+        {
             return Err("rpc_timestamp_invalid");
         }
         self.latest_ms = self.latest_ms.max(now);
@@ -2738,23 +3185,46 @@ async fn handle_worker_run(
     body: Bytes,
 ) -> Response {
     if body.len() > MAX_RPC_BODY_BYTES {
-        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"ok": false, "error": "body_too_large", "cleanup_ok": true}))).into_response();
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"ok": false, "error": "body_too_large", "cleanup_ok": true})),
+        )
+            .into_response();
     }
     let sig = headers
         .get("x-diffuser-signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !verify_rpc(&rt.cfg.rpc_secret_hex, &body, sig) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false, "error": "invalid_signature", "cleanup_ok": true}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"ok": false, "error": "invalid_signature", "cleanup_ok": true})),
+        )
+            .into_response();
     }
     let req: WorkerRunRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "invalid_json", "cleanup_ok": true}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "invalid_json", "cleanup_ok": true})),
+            )
+                .into_response()
+        }
     };
-    if req.rpc_session != rt.rpc_session || !req.job_id.strip_prefix("fjob_").is_some_and(is_random_id) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false, "error": "rpc_identity_invalid", "cleanup_ok": true}))).into_response();
+    if req.rpc_session != rt.rpc_session
+        || !req.job_id.strip_prefix("fjob_").is_some_and(is_random_id)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"ok": false, "error": "rpc_identity_invalid", "cleanup_ok": true})),
+        )
+            .into_response();
     }
-    let accepted = rt.replay.lock().map_err(|_| "rpc_replay_cache_unavailable")
+    let accepted = rt
+        .replay
+        .lock()
+        .map_err(|_| "rpc_replay_cache_unavailable")
         .and_then(|mut replay| replay.consume(&req.job_id, req.issued_at_ms, (rt.clock)()));
     if let Err(error) = accepted {
         let status = match error {
@@ -2762,13 +3232,21 @@ async fn handle_worker_run(
             "rpc_timestamp_invalid" => StatusCode::UNAUTHORIZED,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
-        return (status, Json(json!({"ok": false, "error": error, "cleanup_ok": true}))).into_response();
+        return (
+            status,
+            Json(json!({"ok": false, "error": error, "cleanup_ok": true})),
+        )
+            .into_response();
     }
     let rt_clone = rt.clone();
     let res = tokio::task::spawn_blocking(move || execute_profile(&rt_clone, &req)).await;
     match res {
         Ok(v) => Json(v).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": "worker_panic", "cleanup_ok": false}))).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": "worker_panic", "cleanup_ok": false})),
+        )
+            .into_response(),
     }
 }
 
@@ -2809,7 +3287,11 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
                 return json!({"ok": false, "error": "spawn_failed", "cleanup_ok": true});
             };
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(serde_json::to_string(&req.input).unwrap_or_default().as_bytes());
+                let _ = stdin.write_all(
+                    serde_json::to_string(&req.input)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
             }
             let limit = Duration::from_secs(limit_secs);
             let deadline = std::time::Instant::now() + limit;
@@ -2819,7 +3301,8 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
                         let out = child.wait_with_output();
                         match out {
                             Ok(o) if status.success() => {
-                                let stdout_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                let stdout_str =
+                                    String::from_utf8_lossy(&o.stdout).trim().to_string();
                                 let parsed: Value = serde_json::from_str(&stdout_str)
                                     .unwrap_or_else(|_| json!({"stdout": stdout_str}));
                                 return json!({
@@ -2838,7 +3321,9 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
                                     "cleanup_ok": true
                                 });
                             }
-                            Err(_) => return json!({"ok": false, "error": "wait_failed", "cleanup_ok": false}),
+                            Err(_) => {
+                                return json!({"ok": false, "error": "wait_failed", "cleanup_ok": false})
+                            }
                         }
                     }
                     Ok(None) => {
@@ -2885,7 +3370,8 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
             match resp {
                 Ok(r) if r.status().is_success() => {
                     let text = r.text().unwrap_or_default();
-                    let parsed: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({"body": text}));
+                    let parsed: Value =
+                        serde_json::from_str(&text).unwrap_or_else(|_| json!({"body": text}));
                     json!({
                         "ok": true,
                         "worker_id": rt.cfg.worker_id,
@@ -2894,7 +3380,9 @@ fn execute_profile(rt: &WorkerRuntime, req: &WorkerRunRequest) -> Value {
                         "cleanup_ok": true
                     })
                 }
-                Ok(r) => json!({"ok": false, "error": format!("upstream_http_{}", r.status().as_u16()), "cleanup_ok": true}),
+                Ok(r) => {
+                    json!({"ok": false, "error": format!("upstream_http_{}", r.status().as_u16()), "cleanup_ok": true})
+                }
                 Err(_) => json!({"ok": false, "error": "upstream_unreachable", "cleanup_ok": true}),
             }
         }
@@ -2960,12 +3448,17 @@ fn run_fleet_worker_inner(cfg_path: &Path) -> Result<(), String> {
     // Enroll + background heartbeat thread
     let enroll_url = fleet_endpoint(&controller_url, "/v1/fleet/workers/enroll");
     let mut hb_url = fleet_endpoint(&controller_url, "/v1/fleet/workers");
-    hb_url.path_segments_mut().unwrap().push(&cfg.worker_id).push("heartbeat");
+    hb_url
+        .path_segments_mut()
+        .unwrap()
+        .push(&cfg.worker_id)
+        .push("heartbeat");
+    let rpc_key = &cfg.rpc_secret_hex;
     let enroll_body = json!({
         "worker_id": cfg.worker_id,
         "host": cfg.host,
         "rpc_url": advertise_url.as_str(),
-        "rpc_secret_hex": cfg.rpc_secret_hex,
+        "rpc_secret_hex": rpc_key,
         "rpc_session": rpc_session,
         "cpu_millicores": cfg.cpu_millicores,
         "ram_bytes": cfg.ram_bytes,
@@ -3305,8 +3798,7 @@ mod tests {
                 let mut enrollment = fixture_enrollment(SESSION);
                 enrollment["worker_id"] = json!(worker_id);
                 enrollment["vram_bytes"] = json!(vram_bytes);
-                enrollment["capabilities"] =
-                    json!([{"capability": CAPABILITY, "kind": "exec"}]);
+                enrollment["capabilities"] = json!([{"capability": CAPABILITY, "kind": "exec"}]);
                 assert_eq!(
                     handle_enroll(
                         State(state.clone()),
@@ -3329,7 +3821,13 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 tiers,
-                ["local_gpu", "local_gpu", "cpu_fallback", "cloud_gpu", "local_gpu"]
+                [
+                    "local_gpu",
+                    "local_gpu",
+                    "cpu_fallback",
+                    "cloud_gpu",
+                    "local_gpu"
+                ]
             );
             let discovered =
                 read_json(handle_discover(State(state.clone()), headers.clone()).await).await;
@@ -3377,11 +3875,8 @@ mod tests {
     }
 
     fn open_state(name: &str) -> (PathBuf, FleetState, HeaderMap) {
-        let root = std::env::temp_dir().join(format!(
-            "fleet-{name}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("fleet-{name}-{}-{}", std::process::id(), now_ms()));
         let _ = fs::remove_dir_all(&root);
         crate::private_state::fixture_dir(&root);
         let config = root.join("controller.json");
@@ -3662,22 +4157,40 @@ mod tests {
                 let response = fleet_request(&app, "GET", &path, admin, None, "").await;
                 let rest = read_json(response).await;
                 assert_eq!(rest, expected);
-                assert_eq!(mcp_tool(&tool(&app, admin, "fleet_list_tokens", args).await), rest);
+                assert_eq!(
+                    mcp_tool(&tool(&app, admin, "fleet_list_tokens", args).await),
+                    rest
+                );
             }
-            let default = rpc(&app, admin, json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "fleet_list_tokens"}
-            })).await;
+            let default = rpc(
+                &app,
+                admin,
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "fleet_list_tokens"}
+                }),
+            )
+            .await;
             assert_eq!(mcp_tool(&default), all);
 
-            for query in ["limit=0", "limit=201", "limit=-1", "limit=abc", "include_revoked=1"] {
+            for query in [
+                "limit=0",
+                "limit=201",
+                "limit=-1",
+                "limit=abc",
+                "include_revoked=1",
+            ] {
                 let path = format!("/tokens?{query}");
                 let response = fleet_request(&app, "GET", &path, admin, None, "").await;
                 let (status, body) = response_json(response).await;
                 assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
                 assert_eq!(body["error"]["code"], "invalid_request");
             }
-            for args in [json!({"limit": 201}), json!({"limit": null}), json!({"include_revoked": "false"})] {
+            for args in [
+                json!({"limit": 201}),
+                json!({"limit": null}),
+                json!({"include_revoked": "false"}),
+            ] {
                 let invalid = tool(&app, admin, "fleet_list_tokens", args).await;
                 assert_eq!(invalid["error"]["code"], -32602);
             }
@@ -3690,7 +4203,10 @@ mod tests {
                 assert_eq!(body["error"]["code"], "unauthorized");
             }
             let denied = tool(&app, scoped, "fleet_list_tokens", json!({})).await;
-            assert_eq!(denied["error"], json!({"code": -32000, "message": "admin_required"}));
+            assert_eq!(
+                denied["error"],
+                json!({"code": -32000, "message": "admin_required"})
+            );
             let response = fleet_request(&closed, "GET", "/tokens", admin, None, "").await;
             let (status, body) = response_json(response).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -4181,25 +4697,44 @@ mod tests {
         let (root, state, _) = open_state("mcp-rpc");
         let app = mounted_fleet(&root, true);
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let initialize = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":"init","method":"initialize"})).await;
-            assert_eq!(initialize, json!({"jsonrpc":"2.0","id":"init","result":{
-                "protocolVersion":"2024-11-05","serverInfo":{"name":"diffuser-fleet","version":"1.0.0"},
-                "capabilities":{"tools":{}}
-            }}));
+            for (requested, negotiated) in [
+                ("2025-11-25", "2025-11-25"),
+                ("2025-06-18", "2025-06-18"),
+                ("2024-11-05", "2025-11-25"),
+                ("unknown", "2025-11-25"),
+            ] {
+                let initialize = rpc(&app, "fixture", json!({
+                    "jsonrpc":"2.0","id":"init","method":"initialize",
+                    "params":{"protocolVersion":requested,"capabilities":{},
+                    "clientInfo":{"name":"fixture-client","version":"1"}}
+                })).await;
+                assert_eq!(initialize, json!({"jsonrpc":"2.0","id":"init","result":{
+                    "protocolVersion":negotiated,"serverInfo":{"name":"diffuser-fleet","version":env!("CARGO_PKG_VERSION")},
+                    "capabilities":{"tools":{}}
+                }}));
+            }
             let initialized = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":4,"method":"notifications/initialized","params":{}})).await;
-            assert_eq!(initialized, json!({"jsonrpc":"2.0","id":4,"result":null}));
+            assert_eq!(initialized, json!({"jsonrpc":"2.0","id":4,"error":{"code":-32600,"message":"initialized must be a notification"}}));
             let ping = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":-8,"method":"ping"})).await;
             assert_eq!(ping, json!({"jsonrpc":"2.0","id":-8,"result":{}}));
             enroll_fixture(&app, SESSION).await;
             for notification in [
                 json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-                json!({"jsonrpc":"2.0","method":"notifications/initialized","params":true}),
-                json!({"jsonrpc":"2.0","method":"unknown","params":null}),
+                json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+                json!({"jsonrpc":"2.0","method":"unknown","params":{}}),
                 json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"fleet_drain_worker","arguments":{"worker_id":"worker"}}}),
             ] {
                 let response = fleet_json(&app, "POST", "/mcp", "fixture", notification).await;
                 assert_eq!(response.status(), StatusCode::ACCEPTED);
                 assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().is_empty());
+            }
+            for notification in [
+                json!({"jsonrpc":"2.0","method":"notifications/initialized","params":true}),
+                json!({"jsonrpc":"2.0","method":"unknown","params":null}),
+            ] {
+                let response = fleet_json(&app, "POST", "/mcp", "fixture", notification).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
                 assert!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().is_empty());
             }
             assert_eq!(worker_admission(&state).0, "active");
@@ -4227,6 +4762,11 @@ mod tests {
             assert_eq!(unknown["id"], "unknown");
             for (method, params) in [
                 ("ping", json!({"extra":true})), ("initialize", json!(null)),
+                ("initialize", json!({})),
+                ("initialize", json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{}})),
+                ("tools/list", json!({"cursor":"unused"})),
+                ("tools/call", json!({"name":"fleet_discover","arguments":false})),
+                ("tools/call", json!({"name":"fleet_get_job","arguments":{}})),
                 ("notifications/initialized", json!([])), ("tools/list", json!(true)), ("tools/call", json!([])),
                 ("tools/call", json!({})), ("tools/call", json!({"name":"  "})),
                 ("tools/call", json!({"name":"not_a_tool","arguments":false})),
@@ -4234,13 +4774,92 @@ mod tests {
                 let body = rpc(&app, "fixture", json!({"jsonrpc":"2.0","id":2,"method":method,"params":params})).await;
                 assert_eq!(body["error"]["code"], -32602);
                 assert_eq!(body["id"], 2);
+                assert_eq!(body["jsonrpc"], "2.0");
+                assert!(body.get("result").is_none());
+                assert!(body["error"]["message"].is_string());
             }
-            for method in ["initialize", "notifications/initialized", "ping"] {
+            for method in ["initialize", "notifications/initialized", "ping", "tools/list", "tools/call"] {
                 let response = fleet_json(&app, "POST", "/mcp", "", json!({"jsonrpc":"2.0","method":method})).await;
                 assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             }
             assert_eq!(fleet_request(&app, "POST", "/mcp", "fixture", Some("text/plain"), "{}").await.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
             assert_eq!(fleet_request(&app, "POST", "/mcp", "fixture", Some("application/json"), " ".repeat(1024 * 1024 + 1)).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        });
+        drop(app);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_streamable_http_transport_contract() {
+        let (root, state, _) = open_state("mcp-transport");
+        fs::write(
+            root.join("controller.json"),
+            json!({
+                "admin_token_sha256": sha256_hex(b"fixture"),
+                "mcp_allowed_origins": ["https://fleet.example.test"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let app = mounted_fleet(&root, true);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tower::ServiceExt;
+            for (version, origin, status) in [
+                ("2025-11-25", "https://fleet.example.test", StatusCode::OK),
+                ("2025-06-18", "http://localhost:5820", StatusCode::OK),
+                ("2025-11-25", "http://127.0.0.1:5820", StatusCode::OK),
+                (
+                    "2025-11-25",
+                    "https://unconfigured.example.test",
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    "unsupported",
+                    "https://fleet.example.test",
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/fleet/mcp")
+                            .header(header::AUTHORIZATION, "Bearer fixture")
+                            .header(header::ORIGIN, origin)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header(header::ACCEPT, "application/json, text/event-stream")
+                            .header("MCP-Protocol-Version", version)
+                            .body(Body::from(
+                                json!({"jsonrpc":"2.0","id":7,"method":"tools/list"}).to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                if status == StatusCode::OK {
+                    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+                    let body = read_json(response).await;
+                    assert_eq!(body["id"], 7);
+                    assert_eq!(body["jsonrpc"], "2.0");
+                    assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 9);
+                    assert!(body.get("error").is_none());
+                }
+            }
+            for method in ["GET", "DELETE"] {
+                for (token, status) in [
+                    ("", StatusCode::UNAUTHORIZED),
+                    ("fixture", StatusCode::METHOD_NOT_ALLOWED),
+                ] {
+                    let response = fleet_request(&app, method, "/mcp", token, None, "").await;
+                    assert_eq!(response.status(), status);
+                }
+            }
         });
         drop(app);
         drop(state);
@@ -4276,6 +4895,12 @@ mod tests {
             let catalog = rpc(&app, scoped, list.clone()).await;
             assert_eq!(catalog, rpc(&app, admin, list).await);
             let tools = catalog["result"]["tools"].as_array().unwrap();
+            assert_eq!(catalog["jsonrpc"], "2.0");
+            assert_eq!(catalog["id"], 11);
+            assert!(catalog.get("error").is_none());
+            for entry in tools {
+                assert!(jsonschema::validator_for(&entry["inputSchema"]).is_ok());
+            }
             let names = tools.iter().map(|entry| entry["name"].as_str().unwrap()).collect::<Vec<_>>();
             assert_eq!(names, ["fleet_discover", "fleet_list_workers", "fleet_submit_job", "fleet_get_job", "fleet_issue_token",
                 "fleet_list_jobs", "fleet_drain_worker", "fleet_revoke_token", "fleet_list_tokens"]);
@@ -4349,7 +4974,12 @@ mod tests {
             }
             assert_eq!(read_json(fleet_request(&app, "POST", "/tokens/scoped/revoke", admin, None, "").await).await,
                 json!({"ok":true,"token_id":scoped,"revoked":true}));
-            let discovered = mcp_tool(&tool(&app, admin, "fleet_discover", json!({})).await);
+            let missing = tool(&app, admin, "fleet_get_job", json!({"job_id":"missing"})).await;
+            assert_eq!(missing["result"]["isError"], true);
+            assert!(missing.get("error").is_none());
+            let discovery = tool(&app, admin, "fleet_discover", json!({})).await;
+            assert_eq!(discovery["result"]["isError"], false);
+            let discovered = mcp_tool(&discovery);
             assert_eq!(discovered["schema_version"], "diffuser-fleet/v1");
             assert_eq!(discovered["capabilities"], json!([]));
             let workers = mcp_tool(&tool(&app, admin, "fleet_list_workers", json!({})).await);
@@ -4363,7 +4993,7 @@ mod tests {
                 assert_eq!(denied["error"], json!({"code":-32000,"message":"admin_required"}));
             }
             let invalid = tool(&app, admin, "fleet_issue_token", json!({})).await;
-            assert_eq!(invalid["error"]["code"], -32000);
+            assert_eq!(invalid["error"]["code"], -32602);
             state.db.lock().unwrap().execute("DROP TABLE fleet_jobs", []).unwrap();
             let error = tool(&app, admin, "fleet_list_jobs", json!({})).await;
             assert_eq!(error["error"], json!({"code":-32000,"message":"storage_unavailable"}));
@@ -4493,7 +5123,10 @@ mod tests {
         runtime.block_on(async {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while hits.load(Ordering::SeqCst) == 0 {
-                assert!(std::time::Instant::now() < deadline, "worker was not called");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker was not called"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
@@ -4506,12 +5139,8 @@ mod tests {
         assert!(running["created_at_ms"].as_i64().unwrap() > 0);
 
         let replay = runtime.block_on(async {
-            let response = handle_submit_job(
-                State(state.clone()),
-                submit_headers.clone(),
-                Json(req),
-            )
-            .await;
+            let response =
+                handle_submit_job(State(state.clone()), submit_headers.clone(), Json(req)).await;
             read_json(response).await
         });
         assert_eq!(replay["idempotent_replay"], true);
@@ -4531,10 +5160,16 @@ mod tests {
                     assert_eq!(job["error_code"], Value::Null);
                     let digest = job["output_sha256"].as_str().unwrap();
                     assert_eq!(digest.len(), 64);
-                    assert!(job["updated_at_ms"].as_i64().unwrap() >= job["created_at_ms"].as_i64().unwrap());
+                    assert!(
+                        job["updated_at_ms"].as_i64().unwrap()
+                            >= job["created_at_ms"].as_i64().unwrap()
+                    );
                     break;
                 }
-                assert!(std::time::Instant::now() < deadline, "job stayed running: {job}");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "job stayed running: {job}"
+                );
                 tokio::time::sleep(Duration::from_millis(15)).await;
             }
         });
@@ -4659,7 +5294,10 @@ mod tests {
                     assert_eq!(job["capacity_released"], true);
                     break;
                 }
-                assert!(std::time::Instant::now() < deadline, "mcp job stayed running");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "mcp job stayed running"
+                );
                 tokio::time::sleep(Duration::from_millis(15)).await;
             }
         });
@@ -4778,12 +5416,14 @@ mod tests {
             let response = handle_submit_job(
                 State(state.clone()),
                 submit_headers,
-                Json(serde_json::from_value(json!({
-                    "capability": "long",
-                    "timeout_secs": 5400,
-                    "input": {}
-                }))
-                .unwrap()),
+                Json(
+                    serde_json::from_value(json!({
+                        "capability": "long",
+                        "timeout_secs": 5400,
+                        "input": {}
+                    }))
+                    .unwrap(),
+                ),
             )
             .await;
             read_json(response).await
@@ -5071,7 +5711,10 @@ mod tests {
             });
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while hits.load(Ordering::SeqCst) == 0 {
-                assert!(std::time::Instant::now() < deadline, "worker was not called");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker was not called"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             let (cpu, ram, _) = worker_reserved(&state);
@@ -5093,7 +5736,11 @@ mod tests {
             client.abort();
             tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            assert_eq!(hits.load(Ordering::SeqCst), 1, "dispatch was cancelled with the client");
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "dispatch was cancelled with the client"
+            );
             let (still, _): (String, i64) = state
                 .db
                 .lock()
@@ -5144,10 +5791,9 @@ mod tests {
 
     #[test]
     fn live_gpu_telemetry_parses_and_migration_keeps_existing_rows() {
-        let sample = parse_live_gpu_telemetry(
-            "GPU-aaa, 1024, 8192, 10\nGPU-bbb, 2048, 16384, 90\n",
-        )
-        .unwrap();
+        let sample =
+            parse_live_gpu_telemetry("GPU-aaa, 1024, 8192, 10\nGPU-bbb, 2048, 16384, 90\n")
+                .unwrap();
         assert_eq!(sample.free_bytes, (1024 + 2048) * 1024 * 1024);
         assert_eq!(sample.util_pct, 90);
         assert_eq!(sample.gpus.len(), 2);
@@ -5239,8 +5885,18 @@ mod tests {
         };
         runtime.block_on(async {
             for (worker_id, session, vram, gpu) in [
-                ("busy", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 20_000_000_000u64, "GPU-BUSY"),
-                ("idle", "cccccccccccccccccccccccccccccccc", 8_000_000_000u64, "GPU-IDLE"),
+                (
+                    "busy",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    20_000_000_000u64,
+                    "GPU-BUSY",
+                ),
+                (
+                    "idle",
+                    "cccccccccccccccccccccccccccccccc",
+                    8_000_000_000u64,
+                    "GPU-IDLE",
+                ),
             ] {
                 assert_eq!(
                     handle_enroll(
@@ -5253,10 +5909,8 @@ mod tests {
                     StatusCode::OK
                 );
             }
-            let listed = read_json(
-                handle_list_workers(State(state.clone()), headers.clone()).await,
-            )
-            .await;
+            let listed =
+                read_json(handle_list_workers(State(state.clone()), headers.clone()).await).await;
             let before = &listed["workers"];
             assert_eq!(before[0]["live_vram_free"], Value::Null);
             assert_eq!(before[0]["gpu_util_pct"], Value::Null);
@@ -5269,14 +5923,9 @@ mod tests {
             let worker_id = worker_id.to_string();
             runtime.block_on(async move {
                 assert_eq!(
-                    handle_heartbeat(
-                        State(state),
-                        headers,
-                        AxPath(worker_id),
-                        Json(body),
-                    )
-                    .await
-                    .status(),
+                    handle_heartbeat(State(state), headers, AxPath(worker_id), Json(body),)
+                        .await
+                        .status(),
                     StatusCode::OK
                 );
             });
@@ -5323,7 +5972,10 @@ mod tests {
         assert_eq!(idle["gpu_util_pct"], 3);
         assert_eq!(fresh_worker("steer-util", base.clone()), "idle");
 
-        beat("busy", json!({"gpu_util_pct": 84, "live_vram_free_bytes": 16_000_000_000u64}));
+        beat(
+            "busy",
+            json!({"gpu_util_pct": 84, "live_vram_free_bytes": 16_000_000_000u64}),
+        );
         assert_eq!(fresh_worker("util-84", base.clone()), "busy");
 
         beat(
@@ -5339,7 +5991,10 @@ mod tests {
         assert_eq!(fresh_worker("steer-vram", low.clone()), "idle");
 
         beat("idle", json!({"gpu_util_pct": 90}));
-        beat("busy", json!({"gpu_util_pct": 91, "live_vram_free_bytes": 16_000_000_000u64}));
+        beat(
+            "busy",
+            json!({"gpu_util_pct": 91, "live_vram_free_bytes": 16_000_000_000u64}),
+        );
         match place("all-busy", base.clone()) {
             Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
             Err((_, code, _)) => panic!("expected capacity_exhausted, got {code}"),
@@ -5529,8 +6184,12 @@ mod tests {
             let key = format!("pin-a-agg-{tag}");
             match place(&key, "GPU-A") {
                 Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
-                Err((_, code, _)) => panic!("aggregate-only pin ({tag}) should be capacity_exhausted, got {code}"),
-                Ok(_) => panic!("aggregate-only pin ({tag}) was admitted without per-GPU telemetry"),
+                Err((_, code, _)) => {
+                    panic!("aggregate-only pin ({tag}) should be capacity_exhausted, got {code}")
+                }
+                Ok(_) => {
+                    panic!("aggregate-only pin ({tag}) was admitted without per-GPU telemetry")
+                }
             }
             let agg_reserved: i64 = state
                 .db
@@ -5592,7 +6251,9 @@ mod tests {
         });
         match place("pin-a-omitted-stale", "GPU-A") {
             Err((StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted", _)) => {}
-            Err((_, code, _)) => panic!("stale omitted gpus_live pin should be capacity_exhausted, got {code}"),
+            Err((_, code, _)) => {
+                panic!("stale omitted gpus_live pin should be capacity_exhausted, got {code}")
+            }
             Ok(_) => panic!("stale omitted gpus_live pin was admitted from old sample"),
         }
         let stale_reserved: i64 = state
@@ -5609,6 +6270,124 @@ mod tests {
 
         drop(runtime);
         drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn health_endpoint_includes_live_fleet_summary_and_preserves_legacy_fields() {
+        let root =
+            std::env::temp_dir().join(format!("diffuser-fleet-health-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let cfg_path = root.join("fleet.json");
+        let admin_token = "dummy-health-test-token";
+        fs::write(
+            &cfg_path,
+            serde_json::to_vec(&json!({
+                "admin_token_sha256": sha256_hex(admin_token.as_bytes()),
+                "db_path": root.join("fleet.sqlite")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (fleet_ns, health) = router_with_health(&cfg_path, &root).unwrap();
+        let spine = super::super::Spine {
+            root: root.clone(),
+            edge: false,
+            worker_ports: [0, 0],
+            admin: false,
+            sequence: Arc::new(Mutex::new(0)),
+        };
+
+        let now = now_ms() as i64;
+        {
+            let conn = health.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, gpus_json, capabilities_json, status, last_heartbeat_ms)
+                 VALUES (?1, ?2, ?3, ?4, 4000, 8192, 12000, '[]', ?5, ?6, ?7)",
+                params![
+                    "w-active",
+                    "echo",
+                    "http://127.0.0.1:5831",
+                    "00",
+                    json!([{"capability":"cap.a/v1"},{"capability":"cap.b/v1"}]).to_string(),
+                    "active",
+                    now
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, gpus_json, capabilities_json, status, last_heartbeat_ms)
+                 VALUES (?1, ?2, ?3, ?4, 4000, 8192, 8000, '[]', ?5, ?6, ?7)",
+                params![
+                    "w-draining",
+                    "warp",
+                    "http://127.0.0.1:5832",
+                    "00",
+                    json!([{"capability":"cap.c/v1"}]).to_string(),
+                    "draining",
+                    now
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO fleet_workers (worker_id, host, rpc_url, rpc_secret_hex, cpu_total, ram_total, vram_total, gpus_json, capabilities_json, status, last_heartbeat_ms)
+                 VALUES (?1, ?2, ?3, ?4, 4000, 8192, 0, '[]', ?5, ?6, ?7)",
+                params![
+                    "w-offline",
+                    "nuc",
+                    "http://127.0.0.1:5830",
+                    "00",
+                    json!([{"capability":"cap.d/v1"}]).to_string(),
+                    "active",
+                    now - (HEARTBEAT_TTL_MS as i64) - 5_000
+                ],
+            )
+            .unwrap();
+        }
+
+        let app = super::super::api_with_fleet_health(
+            spine,
+            super::super::lane_assignment::router(),
+            fleet_ns,
+            Some(health),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let body: Value = rt.block_on(async {
+            let resp = tower::ServiceExt::oneshot(
+                app,
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        });
+
+        assert_eq!(body["ready"], json!(true));
+        assert_eq!(body["version"], json!("0.3.0"));
+        assert_eq!(body["profile"], json!("primary"));
+        assert!(body["lanes_summary"].is_array());
+        assert_eq!(body["fleet"]["enabled"], json!(true));
+        assert_eq!(body["fleet"]["fleet_dispatch_allowed"], json!(true));
+        assert_eq!(body["fleet"]["workers_total"], json!(3));
+        assert_eq!(body["fleet"]["workers_active"], json!(1));
+        assert_eq!(body["fleet"]["workers_draining"], json!(1));
+        assert_eq!(body["fleet"]["workers_quarantined"], json!(0));
+        assert_eq!(body["fleet"]["workers_offline"], json!(1));
+        assert_eq!(body["fleet"]["capabilities_count"], json!(2));
+
+        let closed = closed_health_summary();
+        assert_eq!(closed["enabled"], json!(false));
+        assert_eq!(closed["fleet_dispatch_allowed"], json!(false));
+
         fs::remove_dir_all(root).unwrap();
     }
 }

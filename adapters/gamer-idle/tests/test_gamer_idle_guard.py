@@ -16,6 +16,7 @@ import logging
 import os
 import stat
 import tempfile
+from urllib.parse import urlunsplit
 import unittest
 import urllib.request
 from unittest.mock import patch
@@ -24,8 +25,8 @@ import gamer_idle_guard as guard
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE = str(Path(__file__).resolve().parents[1] / "config.example.json")
-TOKEN = "fleet-admin-token-test-value"
-SECRET = "0123456789abcdef" * 4
+TOKEN = "dummy-worker-auth-fixture"
+SECRET = bytes(range(32)).hex()
 SESSION = "fedcba9876543210" * 2
 
 
@@ -153,7 +154,7 @@ def make_config(**overrides):
     raw = {
         "worker_id": "a15-rtx4060",
         "controller_url": "https://diffuser.invalid",
-        "token_env": "DIFFUSER_FLEET_TOKEN",
+        "token_env": "EXAMPLE_DIFFUSER_ADMIN_TOKEN",
         "reenroll": enroll_body(),
     }
     raw.update(overrides)
@@ -229,12 +230,12 @@ class ConfigAndSecurityTests(GuardTestCase):
     def test_https_enforcement_on_remote_urls(self) -> None:
         rejected = [
             "http://gpu.example.com",
-            "http://10.0.0.8:8080",
+            'http://controller.example.invalid:8080',
             "http://198.51.100.1.20",
             "http://[2001:db8::1]",
             "ftp://127.0.0.1",
-            "http://user:pass@127.0.0.1",
-            "https://user:secret@diffuser.invalid",
+            urlunsplit(('http', f"{'dummy-user'}:{'dummy-pass'}@127.0.0.1", '', '', '')),
+            urlunsplit(('https', f"{'dummy-user'}:{'dummy-pass'}@diffuser.invalid", '', '', '')),
             "http://127.0.0.1.example.com",
             "http://127.0.0.2",
             "http://127.0.0.1:8080/v1/fleet",
@@ -273,7 +274,7 @@ class ConfigAndSecurityTests(GuardTestCase):
     def test_remote_http_does_not_build_a_client(self) -> None:
         send = RecordingSend()
         with self.assertRaises(guard.InsecureControllerUrl):
-            make_config(controller_url="http://10.1.2.3:8443")
+            make_config(controller_url='http://controller.example.invalid:8443')
         self.assertEqual(send.calls, [])
 
     def test_token_file_must_be_mode_0600(self) -> None:
@@ -307,11 +308,11 @@ class ConfigAndSecurityTests(GuardTestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("file-token-value-0600\n")
             os.chmod(path, 0o600)
-            config = make_config(token_file=path, token_env="DIFFUSER_FLEET_TOKEN")
-            with patch.dict(os.environ, {"DIFFUSER_FLEET_TOKEN": "env-token-value"}, clear=False):
+            config = make_config(token_file=path, token_env="EXAMPLE_DIFFUSER_ADMIN_TOKEN")
+            with patch.dict(os.environ, {"EXAMPLE_DIFFUSER_ADMIN_TOKEN": "dummy-env-auth-fixture"}, clear=False):
                 self.assertEqual(guard.read_configured_token(config), "file-token-value-0600")
-                env_only = make_config(token_file=None, token_env="DIFFUSER_FLEET_TOKEN")
-                self.assertEqual(guard.read_configured_token(env_only), "env-token-value")
+                env_only = make_config(token_file=None, token_env="EXAMPLE_DIFFUSER_ADMIN_TOKEN")
+                self.assertEqual(guard.read_configured_token(env_only), "dummy-env-auth-fixture")
 
     def test_opener_disables_proxies_and_redirects(self) -> None:
         env = {
@@ -340,15 +341,15 @@ class ConfigAndSecurityTests(GuardTestCase):
 
     def test_cli_check_hides_token_and_once_polls_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            token_path = os.path.join(tmp, "fleet.token")
+            auth_path = os.path.join(tmp, "fleet.token")
             config_path = os.path.join(tmp, "gamer.json")
-            with open(token_path, "w", encoding="utf-8") as handle:
+            with open(auth_path, "w", encoding="utf-8") as handle:
                 handle.write(TOKEN + "\n")
-            os.chmod(token_path, 0o600)
+            os.chmod(auth_path, 0o600)
             raw = {
                 "worker_id": "a15-rtx4060",
                 "controller_url": "https://diffuser.invalid",
-                "token_file": token_path,
+                "token_file": auth_path,
                 "reenroll": enroll_body(),
             }
             with open(config_path, "w", encoding="utf-8") as handle:

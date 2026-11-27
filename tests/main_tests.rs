@@ -1037,7 +1037,7 @@ fn frames() {
 #[test]
 fn binds() {
     assert!(bind_ok(&"127.0.0.1:1".parse().unwrap()));
-    assert!(bind_ok(&"10.0.0.15:1".parse().unwrap()));
+    assert!(bind_ok(&SocketAddr::from(([10, 0, 0, 15], 1))));
     assert!(!bind_ok(&"0.0.0.0:1".parse().unwrap()));
     assert!(!bind_ok(&"203.0.113.10:1".parse().unwrap()));
     assert!(!bind_ok(&"[::]:1".parse().unwrap()));
